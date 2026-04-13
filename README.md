@@ -3,6 +3,8 @@
 An animated 3D fetch tool for your terminal. Takes your distro's ASCII logo,
 turns it into a spinning 3D object, and displays system info alongside it.
 
+![demo](demo.gif)
+
 Built on top of [gentoo.c](https://github.com/areofyl/gentoo.c) and
 [fastfetch](https://github.com/fastfetch-cli/fastfetch).
 
