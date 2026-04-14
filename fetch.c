@@ -480,7 +480,22 @@ int main(int argc, char **argv) {
   const char *shading = ".,-~:;=!*#$@";
 
   for (int i = 1; i < argc; i++) {
-    if ((strcmp(argv[i], "--logo") == 0 || strcmp(argv[i], "-l") == 0) &&
+    if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+      printf("Usage: fetch [options]\n\n"
+             "Options:\n"
+             "  -l, --logo <name>         Use a logo from fastfetch by name\n"
+             "  --rotate-x                Only rotate on the X axis\n"
+             "  --rotate-y                Only rotate on the Y axis\n"
+             "  -s, --speed <float>       Rotation speed multiplier (default 1.0)\n"
+             "  --no-info                 Hide system info, only show the logo\n"
+             "  --no-color                Disable logo coloring\n"
+             "  --frames <n>              Stop after n frames\n"
+             "  --infinite                Never auto-stop\n"
+             "  --shading-chars <str>     Custom ASCII shading ramp\n"
+             "  -h, --help                Show this help\n\n"
+             "Config: ~/.config/fetch/logo.txt\n");
+      return 0;
+    } else if ((strcmp(argv[i], "--logo") == 0 || strcmp(argv[i], "-l") == 0) &&
         i + 1 < argc) {
       logo_name = argv[++i];
     } else if (strcmp(argv[i], "--rotate-x") == 0) {
