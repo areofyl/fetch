@@ -475,6 +475,7 @@ int main(int argc, char **argv) {
   int rotate_x = 1, rotate_y = 1;
   float speed = 1.0f;
   int show_info = 1;
+  int use_color = 1;
 
   for (int i = 1; i < argc; i++) {
     if ((strcmp(argv[i], "--logo") == 0 || strcmp(argv[i], "-l") == 0) &&
@@ -491,6 +492,8 @@ int main(int argc, char **argv) {
       speed = atof(argv[++i]);
     } else if (strcmp(argv[i], "--no-info") == 0) {
       show_info = 0;
+    } else if (strcmp(argv[i], "--no-color") == 0) {
+      use_color = 0;
     }
   }
 
@@ -618,25 +621,29 @@ int main(int argc, char **argv) {
 
     printf("\033[H");
     for (int i = 0; i < HEIGHT; i++) {
-      int prev_color = -1;
-      for (int j = 0; j < ANIM_WIDTH; j++) {
-        if (screen[i][j] == ' ') {
-          if (prev_color != -1) {
-            printf("\033[0m");
-            prev_color = -1;
+      if (!use_color) {
+        fwrite(screen[i], 1, ANIM_WIDTH, stdout);
+      } else {
+        int prev_color = -1;
+        for (int j = 0; j < ANIM_WIDTH; j++) {
+          if (screen[i][j] == ' ') {
+            if (prev_color != -1) {
+              printf("\033[0m");
+              prev_color = -1;
+            }
+            fputc(' ', stdout);
+          } else {
+            int c = colorbuf[i][j];
+            if (c != prev_color) {
+              printf("%s", c == 1 ? color_inner : color_outer);
+              prev_color = c;
+            }
+            fputc(screen[i][j], stdout);
           }
-          fputc(' ', stdout);
-        } else {
-          int c = colorbuf[i][j];
-          if (c != prev_color) {
-            printf("%s", c == 1 ? color_inner : color_outer);
-            prev_color = c;
-          }
-          fputc(screen[i][j], stdout);
         }
+        if (prev_color != -1)
+          printf("\033[0m");
       }
-      if (prev_color != -1)
-        printf("\033[0m");
 
       int fi = i - fetch_start;
       if (fi >= 0 && fi < fetch_line_count) {
