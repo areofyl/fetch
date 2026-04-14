@@ -472,11 +472,22 @@ int main(int argc, char **argv) {
   // Load logo: --logo <name> flag, or ~/.config/fetch/logo.txt, or auto-detect
   char distro[64] = "";
   const char *logo_name = NULL;
+  int rotate_x = 1, rotate_y = 1;
+  float speed = 1.0f;
 
   for (int i = 1; i < argc; i++) {
     if ((strcmp(argv[i], "--logo") == 0 || strcmp(argv[i], "-l") == 0) &&
         i + 1 < argc) {
       logo_name = argv[++i];
+    } else if (strcmp(argv[i], "--rotate-x") == 0) {
+      rotate_x = 1;
+      rotate_y = 0;
+    } else if (strcmp(argv[i], "--rotate-y") == 0) {
+      rotate_x = 0;
+      rotate_y = 1;
+    } else if ((strcmp(argv[i], "--speed") == 0 || strcmp(argv[i], "-s") == 0) &&
+               i + 1 < argc) {
+      speed = atof(argv[++i]);
     }
   }
 
@@ -535,8 +546,8 @@ int main(int argc, char **argv) {
     if (poll(&pfd, 1, 0) > 0)
       break;
     clear_buf();
-    A += 0.04f;
-    B += 0.06f;
+    A += rotate_x ? 0.04f * speed : 0.0f;
+    B += rotate_y ? 0.06f * speed : 0.0f;
     float cA = cosf(A), sA = sinf(A);
     float cB = cosf(B), sB = sinf(B);
 
