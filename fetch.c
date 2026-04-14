@@ -477,6 +477,7 @@ int main(int argc, char **argv) {
   int show_info = 1;
   int use_color = 1;
   int max_frames = 2000; // 0 = infinite
+  const char *shading = ".,-~:;=!*#$@";
 
   for (int i = 1; i < argc; i++) {
     if ((strcmp(argv[i], "--logo") == 0 || strcmp(argv[i], "-l") == 0) &&
@@ -499,6 +500,8 @@ int main(int argc, char **argv) {
       max_frames = atoi(argv[++i]);
     } else if (strcmp(argv[i], "--infinite") == 0) {
       max_frames = 0;
+    } else if (strcmp(argv[i], "--shading-chars") == 0 && i + 1 < argc) {
+      shading = argv[++i];
     }
   }
 
@@ -613,13 +616,13 @@ int main(int argc, char **argv) {
           L = 1.0f;
 
         zbuf[ys][xs] = ooz;
-        const char *chars = ".,-~:;=!*#$@";
-        int ci = (int)(L * 11.0f);
+        int slen = strlen(shading);
+        int ci = (int)(L * (slen - 1));
         if (ci < 0)
           ci = 0;
-        if (ci > 11)
-          ci = 11;
-        screen[ys][xs] = chars[ci];
+        if (ci >= slen)
+          ci = slen - 1;
+        screen[ys][xs] = shading[ci];
         colorbuf[ys][xs] = (PWEIGHT[i] >= 0.5f) ? 1 : 0;
       }
     }
