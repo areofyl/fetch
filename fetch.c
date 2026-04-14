@@ -474,6 +474,7 @@ int main(int argc, char **argv) {
   const char *logo_name = NULL;
   int rotate_x = 1, rotate_y = 1;
   float speed = 1.0f;
+  int show_info = 1;
 
   for (int i = 1; i < argc; i++) {
     if ((strcmp(argv[i], "--logo") == 0 || strcmp(argv[i], "-l") == 0) &&
@@ -488,6 +489,8 @@ int main(int argc, char **argv) {
     } else if ((strcmp(argv[i], "--speed") == 0 || strcmp(argv[i], "-s") == 0) &&
                i + 1 < argc) {
       speed = atof(argv[++i]);
+    } else if (strcmp(argv[i], "--no-info") == 0) {
+      show_info = 0;
     }
   }
 
@@ -514,7 +517,8 @@ int main(int argc, char **argv) {
   if (distro[0])
     set_distro_colors(distro);
 
-  capture_fastfetch();
+  if (show_info)
+    capture_fastfetch();
   build_points();
   compute_threshold();
 
