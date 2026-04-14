@@ -58,6 +58,10 @@ Without a config file or flag, it auto-detects your distro from `/etc/os-release
 | `--infinite` | Never auto-stop (keypress or Ctrl-C to exit) |
 | `--shading-chars <str>` | Custom ASCII shading ramp (default `".,-~:;=!*#$@"`) |
 
+fastfetch is optional — without it, fetch shows just the spinning logo with no
+system info. The `--logo` flag and auto-detection also need fastfetch; without it,
+use `~/.config/fetch/logo.txt` or the built-in Gentoo logo.
+
 ## How it works
 
 - Reads an ASCII logo (from config, fastfetch, or built-in)
