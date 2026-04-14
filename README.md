@@ -44,6 +44,20 @@ You can also pass `--logo <name>` / `-l <name>` to pull any logo from fastfetch:
 
 Without a config file or flag, it auto-detects your distro from `/etc/os-release`.
 
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `-l`, `--logo <name>` | Use a logo from fastfetch by name |
+| `--rotate-x` | Only rotate on the X axis |
+| `--rotate-y` | Only rotate on the Y axis |
+| `-s`, `--speed <float>` | Rotation speed multiplier (default 1.0) |
+| `--no-info` | Hide system info, only show the logo |
+| `--no-color` | Disable logo coloring |
+| `--frames <n>` | Stop after n frames |
+| `--infinite` | Never auto-stop (keypress or Ctrl-C to exit) |
+| `--shading-chars <str>` | Custom ASCII shading ramp (default `".,-~:;=!*#$@"`) |
+
 ## How it works
 
 - Reads an ASCII logo (from config, fastfetch, or built-in)
