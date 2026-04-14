@@ -476,6 +476,7 @@ int main(int argc, char **argv) {
   float speed = 1.0f;
   int show_info = 1;
   int use_color = 1;
+  int max_frames = 2000; // 0 = infinite
 
   for (int i = 1; i < argc; i++) {
     if ((strcmp(argv[i], "--logo") == 0 || strcmp(argv[i], "-l") == 0) &&
@@ -494,6 +495,10 @@ int main(int argc, char **argv) {
       show_info = 0;
     } else if (strcmp(argv[i], "--no-color") == 0) {
       use_color = 0;
+    } else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
+      max_frames = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--infinite") == 0) {
+      max_frames = 0;
     }
   }
 
@@ -548,7 +553,7 @@ int main(int argc, char **argv) {
   printf("\033[?25l\033[2J");
   fflush(stdout);
 
-  for (int frame = 0; frame < 2000; frame++) {
+  for (int frame = 0; max_frames == 0 || frame < max_frames; frame++) {
     struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
     if (poll(&pfd, 1, 0) > 0)
       break;
