@@ -27,7 +27,7 @@ static void handle_signal(int sig) {
 }
 
 #define ANIM_WIDTH 60
-#define MAX_HEIGHT 48
+#define MAX_HEIGHT 200
 #define GAP 2
 
 static int render_height = 36;
@@ -475,7 +475,7 @@ static void load_default_logo(void) {
   }
 }
 
-#define MAX_POINTS 16000
+#define MAX_POINTS 80000
 static float PX[MAX_POINTS], PY[MAX_POINTS], PZ[MAX_POINTS];
 static float NX[MAX_POINTS], NY[MAX_POINTS], NZ[MAX_POINTS];
 static float PWEIGHT[MAX_POINTS];
@@ -500,6 +500,7 @@ static int field_order[F_COUNT];
 static int field_count = 0;
 static char label_color[16] = "35"; // default magenta
 static int config_height = 0; // 0 = auto (match info lines)
+static float size_scale = 1.0f;
 
 static const struct {
   const char *name;
@@ -1418,7 +1419,9 @@ static void build_points(void) {
   const float cx = (logo_cols - 1) * 0.5f;
   const float cy = (logo_rows - 1) * 0.5f;
   const float zmax = 0.18f;
-  const int Z_LAYERS = 6;
+  int Z_LAYERS = (int)(6 * size_scale);
+  if (Z_LAYERS < 6)
+    Z_LAYERS = 6;
 
   float hmap[MAX_LOGO_ROWS][MAX_LOGO_COLS];
   for (int r = 0; r < logo_rows; r++) {
@@ -1468,6 +1471,11 @@ static void build_points(void) {
     }
   }
 
+  // Subdivide grid for larger sizes to avoid gaps
+  int subdiv = (int)size_scale;
+  if (subdiv < 1)
+    subdiv = 1;
+
   int idx = 0;
   for (int row = 0; row < logo_rows; row++) {
     for (int col = 0; col < logo_cols; col++) {
@@ -1475,9 +1483,33 @@ static void build_points(void) {
       if (h <= 0.0f)
         continue;
 
-      float ox = (col - cx) * sx;
-      float oy = (cy - row) * sy;
-      float zr = h * zmax;
+      for (int sr = 0; sr < subdiv; sr++) {
+        for (int sc = 0; sc < subdiv; sc++) {
+          float frow = row + (float)sr / subdiv;
+          float fcol = col + (float)sc / subdiv;
+
+          // Interpolate height from neighbors
+          float ih = h;
+          if (sr > 0 || sc > 0) {
+            float fr = (float)sr / subdiv;
+            float fc = (float)sc / subdiv;
+            int nr = row + (sr > 0 ? 1 : 0);
+            int nc = col + (sc > 0 ? 1 : 0);
+            if (nr >= logo_rows) nr = logo_rows - 1;
+            if (nc >= logo_cols) nc = logo_cols - 1;
+            float h00 = hmap[row][col];
+            float h10 = hmap[nr][col];
+            float h01 = hmap[row][nc];
+            float h11 = hmap[nr][nc];
+            ih = h00 * (1 - fr) * (1 - fc) + h10 * fr * (1 - fc) +
+                 h01 * (1 - fr) * fc + h11 * fr * fc;
+            if (ih <= 0.0f)
+              continue;
+          }
+
+      float ox = (fcol - cx) * sx;
+      float oy = (cy - frow) * sy;
+      float zr = ih * zmax;
 
       for (int k = 0; k < Z_LAYERS; k++) {
         if (idx >= MAX_POINTS)
@@ -1486,7 +1518,7 @@ static void build_points(void) {
         PX[idx] = ox;
         PY[idx] = oy;
         PZ[idx] = t * 2.0f * zr;
-        PWEIGHT[idx] = h;
+        PWEIGHT[idx] = ih;
         PCOLOR[idx] = logo_cell_color[row][col];
 
         if (k == 0) {
@@ -1525,6 +1557,8 @@ static void build_points(void) {
           NZ[idx] = tn;
         }
         idx++;
+      }
+        }
       }
     }
   }
@@ -1656,6 +1690,12 @@ int main(int argc, char **argv) {
       config_height = atoi(argv[++i]);
       if (config_height > MAX_HEIGHT)
         config_height = MAX_HEIGHT;
+    } else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+      size_scale = atof(argv[++i]);
+      if (size_scale < 0.5f)
+        size_scale = 0.5f;
+      if (size_scale > 5.0f)
+        size_scale = 5.0f;
     }
   }
 
@@ -1763,6 +1803,8 @@ int main(int argc, char **argv) {
     // Add some padding (2 top + 2 bottom)
     render_height = fetch_line_count + 4;
   }
+  // Apply size scale
+  render_height = (int)(render_height * size_scale);
   if (render_height < 12)
     render_height = 12;
   if (render_height > MAX_HEIGHT)
