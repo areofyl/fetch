@@ -1016,16 +1016,46 @@ static void gather_disk(void) {
     return;
 
   float total_gib = (float)st.f_blocks * st.f_frsize / (1024 * 1024 * 1024);
-  float avail_gib = (float)st.f_bavail * st.f_frsize / (1024 * 1024 * 1024);
-  float used_gib = total_gib - avail_gib;
+  float free_gib = (float)st.f_bfree * st.f_frsize / (1024 * 1024 * 1024);
+  float used_gib = total_gib - free_gib;
   int pct = (int)(used_gib * 100 / total_gib);
   const char *color = pct >= 80 ? "31" : pct >= 50 ? "93" : "32";
 
+  // Get filesystem type from df
+  char fstype[32] = "";
+  FILE *fp = popen("df -T / 2>/dev/null | tail -1", "r");
+  if (fp) {
+    char buf[256];
+    if (fgets(buf, sizeof(buf), fp)) {
+      // Format: /dev/xxx ext4 ...
+      char *p = buf;
+      while (*p && *p != ' ')
+        p++; // skip device
+      while (*p == ' ')
+        p++;
+      char *end = p;
+      while (*end && *end != ' ')
+        end++;
+      int len = end - p;
+      if (len > 0 && len < (int)sizeof(fstype)) {
+        memcpy(fstype, p, len);
+        fstype[len] = '\0';
+      }
+    }
+    pclose(fp);
+  }
+
   char line[MAX_LINE_LEN];
-  snprintf(
-      line, sizeof(line),
-      "\033[1;35mDisk (/)\033[0m: %.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)",
-      used_gib, total_gib, color, pct);
+  if (fstype[0])
+    snprintf(line, sizeof(line),
+             "\033[1;35mDisk (/)\033[0m: %.2f GiB / %.2f GiB "
+             "(\033[%sm%d%%\033[0m) - %s",
+             used_gib, total_gib, color, pct, fstype);
+  else
+    snprintf(line, sizeof(line),
+             "\033[1;35mDisk (/)\033[0m: %.2f GiB / %.2f GiB "
+             "(\033[%sm%d%%\033[0m)",
+             used_gib, total_gib, color, pct);
   add_line(line);
 }
 
@@ -1125,10 +1155,42 @@ static void gather_battery(void) {
     fclose(fp);
   }
 
+  // Get time remaining estimate from power_now
+  char time_str[64] = "";
+  if (energy_now > 0) {
+    long power_now = 0;
+    snprintf(path, sizeof(path), "/sys/class/power_supply/%s/power_now",
+             bat_name);
+    fp = fopen(path, "r");
+    if (fp) {
+      if (fscanf(fp, "%ld", &power_now) != 1)
+        power_now = 0;
+      fclose(fp);
+    }
+    // power_now is negative when discharging on some systems
+    if (power_now < 0)
+      power_now = -power_now;
+    if (power_now > 0) {
+      int mins_left = (int)((float)energy_now / power_now * 60);
+      int hours = mins_left / 60;
+      int mins = mins_left % 60;
+      if (hours > 0)
+        snprintf(time_str, sizeof(time_str), "%d hour%s, %d min%s remaining",
+                 hours, hours == 1 ? "" : "s", mins, mins == 1 ? "" : "s");
+      else
+        snprintf(time_str, sizeof(time_str), "%d min%s remaining", mins,
+                 mins == 1 ? "" : "s");
+    }
+  }
+
   if (capacity >= 0) {
     const char *color = capacity >= 50 ? "32" : capacity >= 20 ? "93" : "31";
     char line[MAX_LINE_LEN];
-    if (status[0])
+    if (time_str[0] && status[0])
+      snprintf(line, sizeof(line),
+               "\033[1;35mBattery\033[0m: \033[%sm%d%%\033[0m (%s) [%s]",
+               color, capacity, time_str, status);
+    else if (status[0])
       snprintf(line, sizeof(line),
                "\033[1;35mBattery\033[0m: \033[%sm%d%%\033[0m [%s]", color,
                capacity, status);
@@ -1140,65 +1202,143 @@ static void gather_battery(void) {
   }
 }
 
-static void capture_fastfetch(void) {
-  FILE *fp = popen("fastfetch --logo none --pipe false 2>/dev/null", "r");
+static void gather_terminal(void) {
+  char term[64] = "";
+  // Try TERM_PROGRAM first, then walk up the process tree
+  char *tp = getenv("TERM_PROGRAM");
+  if (tp && tp[0]) {
+    strncpy(term, tp, sizeof(term) - 1);
+  } else {
+    // Get parent process name (the terminal)
+    FILE *fp = popen("ps -o comm= -p $(ps -o ppid= -p $$) 2>/dev/null", "r");
+    if (fp) {
+      if (fgets(term, sizeof(term), fp)) {
+        int len = strlen(term);
+        while (len > 0 && (term[len - 1] == '\n' || term[len - 1] == '\r'))
+          term[--len] = '\0';
+      }
+      pclose(fp);
+    }
+  }
+  if (term[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mTerminal\033[0m: %s", term);
+    add_line(line);
+  }
+}
+
+static void gather_ip(void) {
+  FILE *fp = popen("ip -4 -o addr show scope global 2>/dev/null | head -1",
+                   "r");
   if (!fp)
     return;
-  char buf[MAX_LINE_LEN];
-  int skip_header = 1;
-  while (fetch_line_count < MAX_FETCH_LINES &&
-         fgets(buf, sizeof(buf), fp) != NULL) {
-    int len = strlen(buf);
-    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-      buf[--len] = '\0';
-    // Skip the first two lines (user@host + separator) from fastfetch
-    // since we generate those ourselves now
-    if (skip_header) {
-      if (len > 0 && len < 80 && buf[len - 1] != ':') {
-        // Check if line is all dashes (separator)
-        int all_dash = 1;
-        for (int i = 0; i < len; i++) {
-          if (buf[i] != '-') {
-            all_dash = 0;
-            break;
-          }
-        }
-        if (all_dash) {
-          skip_header = 0;
-          continue;
+  char buf[256];
+  if (fgets(buf, sizeof(buf), fp)) {
+    // Format: "2: wld0    inet 192.168.1.160/24 ..."
+    char iface[32] = "", addr[64] = "";
+    char *inet = strstr(buf, "inet ");
+    if (inet) {
+      inet += 5;
+      char *space = strchr(inet, ' ');
+      if (space) {
+        int len = space - inet;
+        if (len < (int)sizeof(addr)) {
+          memcpy(addr, inet, len);
+          addr[len] = '\0';
         }
       }
-      // Skip the user@host line too
-      if (strstr(buf, "@")) {
-        continue;
-      }
-      skip_header = 0;
-    }
-    // Skip lines we generate natively (check for label after ANSI codes)
-    const char *p = buf;
-    while (*p == '\033') {
-      p++;
-      if (*p == '[') {
+      // Get interface name (second field)
+      char *p = buf;
+      // Skip index
+      while (*p && *p != ' ')
         p++;
-        while (*p && ((*p >= '0' && *p <= '9') || *p == ';'))
-          p++;
-        if (*p)
-          p++;
+      while (*p == ' ')
+        p++;
+      char *end = p;
+      while (*end && *end != ' ')
+        end++;
+      int ilen = end - p;
+      if (ilen < (int)sizeof(iface)) {
+        memcpy(iface, p, ilen);
+        iface[ilen] = '\0';
       }
     }
-    if (strncmp(p, "OS", 2) == 0 || strncmp(p, "Host", 4) == 0 ||
-        strncmp(p, "Kernel", 6) == 0 || strncmp(p, "Uptime", 6) == 0 ||
-        strncmp(p, "Packages", 8) == 0 || strncmp(p, "Shell", 5) == 0 ||
-        strncmp(p, "Display", 7) == 0 || strncmp(p, "WM", 2) == 0 ||
-        strncmp(p, "CPU", 3) == 0 || strncmp(p, "GPU", 3) == 0 ||
-        strncmp(p, "Memory", 6) == 0 || strncmp(p, "Swap", 4) == 0 ||
-        strncmp(p, "Disk", 4) == 0 || strncmp(p, "Battery", 7) == 0)
-      continue;
-
-    memcpy(fetch_lines[fetch_line_count], buf, len + 1);
-    fetch_line_count++;
+    if (addr[0]) {
+      char line[MAX_LINE_LEN];
+      if (iface[0])
+        snprintf(line, sizeof(line),
+                 "\033[1;35mLocal IP (%s)\033[0m: %s", iface, addr);
+      else
+        snprintf(line, sizeof(line), "\033[1;35mLocal IP\033[0m: %s", addr);
+      add_line(line);
+    }
   }
   pclose(fp);
+}
+
+static void gather_locale(void) {
+  char *lang = getenv("LANG");
+  if (lang && lang[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mLocale\033[0m: %s", lang);
+    add_line(line);
+  }
+}
+
+static void read_gtk_setting(const char *key, char *out, int maxlen) {
+  char path[512];
+  const char *home = getenv("HOME");
+  if (!home)
+    return;
+  snprintf(path, sizeof(path), "%s/.config/gtk-3.0/settings.ini", home);
+  FILE *fp = fopen(path, "r");
+  if (!fp)
+    return;
+  char buf[256];
+  int keylen = strlen(key);
+  while (fgets(buf, sizeof(buf), fp)) {
+    if (strncmp(buf, key, keylen) == 0 && buf[keylen] == '=') {
+      char *val = buf + keylen + 1;
+      int len = strlen(val);
+      while (len > 0 && (val[len - 1] == '\n' || val[len - 1] == '\r'))
+        val[--len] = '\0';
+      if (len > 0 && len < maxlen) {
+        memcpy(out, val, len + 1);
+      }
+      break;
+    }
+  }
+  fclose(fp);
+}
+
+static void gather_theme(void) {
+  char theme[64] = "";
+  read_gtk_setting("gtk-theme-name", theme, sizeof(theme));
+  if (theme[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mTheme\033[0m: %s [GTK3]", theme);
+    add_line(line);
+  }
+}
+
+static void gather_icons(void) {
+  char icons[64] = "";
+  read_gtk_setting("gtk-icon-theme-name", icons, sizeof(icons));
+  if (icons[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mIcons\033[0m: %s [GTK3]", icons);
+    add_line(line);
+  }
+}
+
+static void gather_font(void) {
+  char font[128] = "";
+  read_gtk_setting("gtk-font-name", font, sizeof(font));
+  if (font[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mFont\033[0m: %s [GTK3]", font);
+    add_line(line);
+  }
 }
 
 // Screen buffer: each cell holds one UTF-8 codepoint (up to 4 bytes + NUL)
@@ -1525,13 +1665,18 @@ int main(int argc, char **argv) {
     gather_shell();
     gather_display();
     gather_wm();
+    gather_theme();
+    gather_icons();
+    gather_font();
+    gather_terminal();
     gather_cpu();
     gather_gpu();
     gather_memory();
     gather_swap();
     gather_disk();
+    gather_ip();
     gather_battery();
-    capture_fastfetch();
+    gather_locale();
   }
   build_points();
   compute_threshold();
