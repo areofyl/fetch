@@ -585,6 +585,36 @@ static void gather_kernel(void) {
   add_line(line);
 }
 
+static void gather_uptime(void) {
+  FILE *fp = fopen("/proc/uptime", "r");
+  if (!fp)
+    return;
+  double secs = 0;
+  if (fscanf(fp, "%lf", &secs) != 1)
+    secs = 0;
+  fclose(fp);
+
+  int total = (int)secs;
+  int days = total / 86400;
+  int hours = (total % 86400) / 3600;
+  int mins = (total % 3600) / 60;
+
+  char val[128];
+  if (days > 0)
+    snprintf(val, sizeof(val), "%d day%s, %d hour%s, %d min%s", days,
+             days == 1 ? "" : "s", hours, hours == 1 ? "" : "s", mins,
+             mins == 1 ? "" : "s");
+  else if (hours > 0)
+    snprintf(val, sizeof(val), "%d hour%s, %d min%s", hours,
+             hours == 1 ? "" : "s", mins, mins == 1 ? "" : "s");
+  else
+    snprintf(val, sizeof(val), "%d min%s", mins, mins == 1 ? "" : "s");
+
+  char line[MAX_LINE_LEN];
+  snprintf(line, sizeof(line), "\033[1;35mUptime\033[0m: %s", val);
+  add_line(line);
+}
+
 static void capture_fastfetch(void) {
   FILE *fp = popen("fastfetch --logo none --pipe false 2>/dev/null", "r");
   if (!fp)
@@ -632,7 +662,7 @@ static void capture_fastfetch(void) {
       }
     }
     if (strncmp(p, "OS", 2) == 0 || strncmp(p, "Host", 4) == 0 ||
-        strncmp(p, "Kernel", 6) == 0)
+        strncmp(p, "Kernel", 6) == 0 || strncmp(p, "Uptime", 6) == 0)
       continue;
 
     memcpy(fetch_lines[fetch_line_count], buf, len + 1);
@@ -960,6 +990,7 @@ int main(int argc, char **argv) {
     gather_os();
     gather_host();
     gather_kernel();
+    gather_uptime();
     capture_fastfetch();
   }
   build_points();
