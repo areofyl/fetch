@@ -33,7 +33,7 @@ sudo make install
 
 By default it auto-detects your distro and grabs the logo from fastfetch
 (if installed) with its original per-character colors preserved. Works with
-any of fastfetch's 500+ distro logos.
+any of fastfetch's 500+ distro logos!
 
 You can also specify one directly:
 
