@@ -800,6 +800,151 @@ static void gather_wm(void) {
   }
 }
 
+static void gather_cpu(void) {
+  char name[128] = "";
+  int cores = 0;
+  float max_ghz = 0;
+
+  // Try x86 model name first
+  FILE *fp = fopen("/proc/cpuinfo", "r");
+  if (fp) {
+    char buf[256];
+    while (fgets(buf, sizeof(buf), fp)) {
+      if (!name[0] && strncmp(buf, "model name", 10) == 0) {
+        char *val = strchr(buf, ':');
+        if (val) {
+          val++;
+          while (*val == ' ')
+            val++;
+          int len = strlen(val);
+          while (len > 0 && (val[len - 1] == '\n' || val[len - 1] == '\r'))
+            len--;
+          if (len > 0 && len < (int)sizeof(name)) {
+            memcpy(name, val, len);
+            name[len] = '\0';
+          }
+        }
+      }
+      if (strncmp(buf, "processor", 9) == 0)
+        cores++;
+    }
+    fclose(fp);
+  }
+
+  // ARM/Apple Silicon: extract chip from device-tree model
+  if (!name[0]) {
+    char model[128] = "";
+    fp = fopen("/proc/device-tree/model", "r");
+    if (fp) {
+      if (fgets(model, sizeof(model), fp)) {
+        int len = strlen(model);
+        while (len > 0 && (model[len - 1] == '\n' || model[len - 1] == '\0'))
+          len--;
+        model[len] = '\0';
+      }
+      fclose(fp);
+    }
+    // Extract chip name like "M1" from "Apple MacBook Air (M1, 2020)"
+    char *paren = strchr(model, '(');
+    if (paren) {
+      paren++;
+      char *comma = strchr(paren, ',');
+      char *end = comma ? comma : strchr(paren, ')');
+      if (end) {
+        snprintf(name, sizeof(name), "Apple %.*s", (int)(end - paren), paren);
+      }
+    }
+  }
+
+  // Get max frequency from cpufreq
+  fp = popen(
+      "cat /sys/devices/system/cpu/cpufreq/policy*/cpuinfo_max_freq "
+      "2>/dev/null | sort -rn | head -1",
+      "r");
+  if (fp) {
+    char buf[32];
+    if (fgets(buf, sizeof(buf), fp)) {
+      long khz = atol(buf);
+      if (khz > 0)
+        max_ghz = khz / 1000000.0f;
+    }
+    pclose(fp);
+  }
+
+  if (name[0]) {
+    char line[MAX_LINE_LEN];
+    if (cores > 0 && max_ghz > 0)
+      snprintf(line, sizeof(line),
+               "\033[1;35mCPU\033[0m: %s (%d) @ %.2f GHz", name, cores,
+               max_ghz);
+    else if (cores > 0)
+      snprintf(line, sizeof(line), "\033[1;35mCPU\033[0m: %s (%d)", name,
+               cores);
+    else
+      snprintf(line, sizeof(line), "\033[1;35mCPU\033[0m: %s", name);
+    add_line(line);
+  }
+}
+
+static void gather_gpu(void) {
+  char name[128] = "";
+
+  // Try DRM device-tree compatible (ARM/Apple Silicon)
+  FILE *fp =
+      popen("cat /sys/class/drm/card*/device/uevent 2>/dev/null", "r");
+  if (fp) {
+    char buf[256];
+    while (fgets(buf, sizeof(buf), fp)) {
+      if (strncmp(buf, "OF_COMPATIBLE_0=apple,agx", 24) == 0) {
+        // Apple GPU — name matches the CPU chip
+        char cpu[64] = "";
+        FILE *mfp = fopen("/proc/device-tree/model", "r");
+        if (mfp) {
+          char model[128];
+          if (fgets(model, sizeof(model), mfp)) {
+            char *paren = strchr(model, '(');
+            if (paren) {
+              paren++;
+              char *comma = strchr(paren, ',');
+              char *end = comma ? comma : strchr(paren, ')');
+              if (end)
+                snprintf(cpu, sizeof(cpu), "%.*s", (int)(end - paren), paren);
+            }
+          }
+          fclose(mfp);
+        }
+        if (cpu[0])
+          snprintf(name, sizeof(name), "Apple %s [Integrated]", cpu);
+        else
+          strcpy(name, "Apple GPU [Integrated]");
+        break;
+      }
+      // x86: try PCI-based detection
+      if (strncmp(buf, "DRIVER=", 7) == 0) {
+        char *drv = buf + 7;
+        int len = strlen(drv);
+        while (len > 0 && (drv[len - 1] == '\n' || drv[len - 1] == '\r'))
+          drv[--len] = '\0';
+        if (strcmp(drv, "i915") == 0 || strcmp(drv, "xe") == 0)
+          strcpy(name, "Intel GPU [Integrated]");
+        else if (strcmp(drv, "amdgpu") == 0 || strcmp(drv, "radeon") == 0)
+          strcpy(name, "AMD GPU");
+        else if (strcmp(drv, "nvidia") == 0 || strcmp(drv, "nouveau") == 0)
+          strcpy(name, "NVIDIA GPU");
+        if (name[0])
+          break;
+      }
+    }
+    pclose(fp);
+  }
+
+  if (name[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mGPU\033[0m: %s", name);
+    add_line(line);
+  }
+}
+
 static void capture_fastfetch(void) {
   FILE *fp = popen("fastfetch --logo none --pipe false 2>/dev/null", "r");
   if (!fp)
@@ -849,7 +994,8 @@ static void capture_fastfetch(void) {
     if (strncmp(p, "OS", 2) == 0 || strncmp(p, "Host", 4) == 0 ||
         strncmp(p, "Kernel", 6) == 0 || strncmp(p, "Uptime", 6) == 0 ||
         strncmp(p, "Packages", 8) == 0 || strncmp(p, "Shell", 5) == 0 ||
-        strncmp(p, "Display", 7) == 0 || strncmp(p, "WM", 2) == 0)
+        strncmp(p, "Display", 7) == 0 || strncmp(p, "WM", 2) == 0 ||
+        strncmp(p, "CPU", 3) == 0 || strncmp(p, "GPU", 3) == 0)
       continue;
 
     memcpy(fetch_lines[fetch_line_count], buf, len + 1);
@@ -1182,6 +1328,8 @@ int main(int argc, char **argv) {
     gather_shell();
     gather_display();
     gather_wm();
+    gather_cpu();
+    gather_gpu();
     capture_fastfetch();
   }
   build_points();
