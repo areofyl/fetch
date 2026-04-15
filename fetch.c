@@ -615,6 +615,119 @@ static void gather_uptime(void) {
   add_line(line);
 }
 
+static int count_dir_entries(const char *path) {
+  int count = 0;
+  FILE *fp = popen(path, "r");
+  if (!fp)
+    return 0;
+  char buf[512];
+  while (fgets(buf, sizeof(buf), fp))
+    count++;
+  pclose(fp);
+  return count;
+}
+
+static void gather_packages(void) {
+  char val[128] = "";
+  int n;
+
+  // emerge (Gentoo)
+  n = count_dir_entries("ls -d /var/db/pkg/*/* 2>/dev/null");
+  if (n > 0) {
+    snprintf(val, sizeof(val), "%d (emerge)", n);
+  }
+  // pacman (Arch)
+  if (!val[0]) {
+    n = count_dir_entries(
+        "ls -d /var/lib/pacman/local/*-* 2>/dev/null");
+    if (n > 0)
+      snprintf(val, sizeof(val), "%d (pacman)", n);
+  }
+  // dpkg (Debian/Ubuntu)
+  if (!val[0]) {
+    n = count_dir_entries("dpkg-query -f '.\n' -W 2>/dev/null");
+    if (n > 0)
+      snprintf(val, sizeof(val), "%d (dpkg)", n);
+  }
+  // rpm (Fedora/RHEL)
+  if (!val[0]) {
+    n = count_dir_entries("rpm -qa 2>/dev/null");
+    if (n > 0)
+      snprintf(val, sizeof(val), "%d (rpm)", n);
+  }
+  // xbps (Void)
+  if (!val[0]) {
+    n = count_dir_entries("xbps-query -l 2>/dev/null");
+    if (n > 0)
+      snprintf(val, sizeof(val), "%d (xbps)", n);
+  }
+  // apk (Alpine)
+  if (!val[0]) {
+    n = count_dir_entries("apk list --installed 2>/dev/null");
+    if (n > 0)
+      snprintf(val, sizeof(val), "%d (apk)", n);
+  }
+
+  if (val[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mPackages\033[0m: %s", val);
+    add_line(line);
+  }
+}
+
+static void gather_shell(void) {
+  char *shell = getenv("SHELL");
+  if (!shell)
+    return;
+
+  // Get just the basename
+  char *name = strrchr(shell, '/');
+  name = name ? name + 1 : shell;
+
+  // Try to get version
+  char version[128] = "";
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "%s --version 2>/dev/null", shell);
+  FILE *fp = popen(cmd, "r");
+  if (fp) {
+    char buf[256];
+    if (fgets(buf, sizeof(buf), fp)) {
+      // Extract version number from first line
+      // e.g. "zsh 5.9.0.3-test (aarch64...)" or "bash 5.2.26(1)-release"
+      char *p = buf;
+      // Find the version part after the shell name
+      char *ver = strstr(buf, name);
+      if (ver) {
+        ver += strlen(name);
+        while (*ver == ' ')
+          ver++;
+      } else {
+        // Try to find first digit
+        ver = buf;
+        while (*ver && !(*ver >= '0' && *ver <= '9'))
+          ver++;
+      }
+      if (*ver) {
+        int len = 0;
+        while (ver[len] && ver[len] != ' ' && ver[len] != '(' &&
+               ver[len] != '\n' && len < 30)
+          len++;
+        memcpy(version, ver, len);
+        version[len] = '\0';
+      }
+    }
+    pclose(fp);
+  }
+
+  char line[MAX_LINE_LEN];
+  if (version[0])
+    snprintf(line, sizeof(line), "\033[1;35mShell\033[0m: %s %s", name,
+             version);
+  else
+    snprintf(line, sizeof(line), "\033[1;35mShell\033[0m: %s", name);
+  add_line(line);
+}
+
 static void capture_fastfetch(void) {
   FILE *fp = popen("fastfetch --logo none --pipe false 2>/dev/null", "r");
   if (!fp)
@@ -662,7 +775,8 @@ static void capture_fastfetch(void) {
       }
     }
     if (strncmp(p, "OS", 2) == 0 || strncmp(p, "Host", 4) == 0 ||
-        strncmp(p, "Kernel", 6) == 0 || strncmp(p, "Uptime", 6) == 0)
+        strncmp(p, "Kernel", 6) == 0 || strncmp(p, "Uptime", 6) == 0 ||
+        strncmp(p, "Packages", 8) == 0 || strncmp(p, "Shell", 5) == 0)
       continue;
 
     memcpy(fetch_lines[fetch_line_count], buf, len + 1);
@@ -991,6 +1105,8 @@ int main(int argc, char **argv) {
     gather_host();
     gather_kernel();
     gather_uptime();
+    gather_packages();
+    gather_shell();
     capture_fastfetch();
   }
   build_points();
