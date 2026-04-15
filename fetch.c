@@ -332,10 +332,63 @@ static int parse_os_release_val(const char *buf, int prefix_len, char *out,
   return 0;
 }
 
-// Detect distro from /etc/os-release. Also fills id_like as fallback.
+// Try to detect distro using fastfetch --json first (it's smarter than
+// os-release, e.g. it detects Proxmox even though ID=debian).
+// Falls back to /etc/os-release if fastfetch isn't available.
 static char distro_id_like[64] = "";
 
-static int detect_distro(char *out, int maxlen) {
+static int detect_distro_fastfetch(char *out, int maxlen) {
+  FILE *fp = popen("fastfetch --json 2>/dev/null", "r");
+  if (!fp)
+    return 0;
+  char buf[1024];
+  int found_os = 0;
+  while (fgets(buf, sizeof(buf), fp)) {
+    // Look for "id": "..." after "type": "OS"
+    if (strstr(buf, "\"OS\""))
+      found_os = 1;
+    if (found_os) {
+      char *id_pos = strstr(buf, "\"id\"");
+      if (id_pos) {
+        // Extract value: "id": "gentoo"
+        char *colon = strchr(id_pos, ':');
+        if (colon) {
+          char *q1 = strchr(colon, '"');
+          if (q1) {
+            q1++;
+            char *q2 = strchr(q1, '"');
+            if (q2 && q2 - q1 > 0 && q2 - q1 < maxlen) {
+              memcpy(out, q1, q2 - q1);
+              out[q2 - q1] = '\0';
+              pclose(fp);
+              return 1;
+            }
+          }
+        }
+      }
+      // Also grab idLike
+      char *like_pos = strstr(buf, "\"idLike\"");
+      if (like_pos) {
+        char *colon = strchr(like_pos, ':');
+        if (colon) {
+          char *q1 = strchr(colon, '"');
+          if (q1) {
+            q1++;
+            char *q2 = strchr(q1, '"');
+            if (q2 && q2 - q1 > 0 && q2 - q1 < (int)sizeof(distro_id_like)) {
+              memcpy(distro_id_like, q1, q2 - q1);
+              distro_id_like[q2 - q1] = '\0';
+            }
+          }
+        }
+      }
+    }
+  }
+  pclose(fp);
+  return 0;
+}
+
+static int detect_distro_os_release(char *out, int maxlen) {
   FILE *fp = fopen("/etc/os-release", "r");
   if (!fp)
     return 0;
@@ -350,6 +403,12 @@ static int detect_distro(char *out, int maxlen) {
   }
   fclose(fp);
   return found_id;
+}
+
+static int detect_distro(char *out, int maxlen) {
+  if (detect_distro_fastfetch(out, maxlen))
+    return 1;
+  return detect_distro_os_release(out, maxlen);
 }
 
 static void load_default_logo(void) {
