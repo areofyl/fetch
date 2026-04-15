@@ -27,8 +27,10 @@ static void handle_signal(int sig) {
 }
 
 #define ANIM_WIDTH 60
-#define HEIGHT 36
+#define MAX_HEIGHT 48
 #define GAP 2
+
+static int render_height = 36;
 #define PI 3.14159265f
 
 // --- UTF-8 helpers ---
@@ -497,6 +499,7 @@ static int field_enabled[F_COUNT];
 static int field_order[F_COUNT];
 static int field_count = 0;
 static char label_color[16] = "35"; // default magenta
+static int config_height = 0; // 0 = auto (match info lines)
 
 static const struct {
   const char *name;
@@ -568,6 +571,12 @@ static void load_config(void) {
       else if (strcmp(val, "cyan") == 0) strcpy(label_color, "36");
       else if (strcmp(val, "white") == 0) strcpy(label_color, "37");
       else strncpy(label_color, val, sizeof(label_color) - 1);
+      continue;
+    }
+    if (strncmp(line, "height=", 7) == 0) {
+      config_height = atoi(line + 7);
+      if (config_height > MAX_HEIGHT)
+        config_height = MAX_HEIGHT;
       continue;
     }
 
@@ -1389,12 +1398,12 @@ static void gather_font(void) {
 }
 
 // Screen buffer: each cell holds one UTF-8 codepoint (up to 4 bytes + NUL)
-static char screen[HEIGHT][ANIM_WIDTH][5];
-static float zbuf[HEIGHT][ANIM_WIDTH];
-static int colorbuf[HEIGHT][ANIM_WIDTH];
+static char screen[MAX_HEIGHT][ANIM_WIDTH][5];
+static float zbuf[MAX_HEIGHT][ANIM_WIDTH];
+static int colorbuf[MAX_HEIGHT][ANIM_WIDTH];
 
 static void clear_buf(void) {
-  for (int i = 0; i < HEIGHT; i++)
+  for (int i = 0; i < render_height; i++)
     for (int j = 0; j < ANIM_WIDTH; j++) {
       screen[i][j][0] = ' ';
       screen[i][j][1] = '\0';
@@ -1643,6 +1652,10 @@ int main(int argc, char **argv) {
       max_frames = 0;
     } else if (strcmp(argv[i], "--shading-chars") == 0 && i + 1 < argc) {
       shading = argv[++i];
+    } else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
+      config_height = atoi(argv[++i]);
+      if (config_height > MAX_HEIGHT)
+        config_height = MAX_HEIGHT;
     }
   }
 
@@ -1743,6 +1756,18 @@ int main(int argc, char **argv) {
       }
     }
   }
+  // Set render height: config/flag override > auto-fit to info lines > default
+  if (config_height > 0) {
+    render_height = config_height;
+  } else if (show_info && fetch_line_count > 0) {
+    // Add some padding (2 top + 2 bottom)
+    render_height = fetch_line_count + 4;
+  }
+  if (render_height < 12)
+    render_height = 12;
+  if (render_height > MAX_HEIGHT)
+    render_height = MAX_HEIGHT;
+
   build_points();
   compute_threshold();
 
@@ -1808,8 +1833,8 @@ int main(int argc, char **argv) {
         continue;
       float ooz = 1.0f / zc;
       int xs = (int)((float)ANIM_WIDTH * 0.5f + K1 * 2.0f * x2 * ooz);
-      int ys = (int)((float)HEIGHT * 0.35f - K1 * y2 * ooz);
-      if (xs < 0 || xs >= ANIM_WIDTH || ys < 0 || ys >= HEIGHT)
+      int ys = (int)((float)render_height * 0.35f - K1 * y2 * ooz);
+      if (xs < 0 || xs >= ANIM_WIDTH || ys < 0 || ys >= render_height)
         continue;
 
       if (ooz > zbuf[ys][xs]) {
@@ -1841,7 +1866,7 @@ int main(int argc, char **argv) {
     }
 
     printf("\033[H");
-    for (int i = 0; i < HEIGHT; i++) {
+    for (int i = 0; i < render_height; i++) {
       if (!use_color) {
         for (int j = 0; j < ANIM_WIDTH; j++)
           fputs(screen[i][j], stdout);
