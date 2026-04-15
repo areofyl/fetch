@@ -1,6 +1,7 @@
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -485,12 +486,126 @@ static int POINT_COUNT = 0;
 static char fetch_lines[MAX_FETCH_LINES][MAX_LINE_LEN];
 static int fetch_line_count = 0;
 
+// --- Config ---
+enum {
+  F_OS, F_HOST, F_KERNEL, F_UPTIME, F_PACKAGES, F_SHELL, F_DISPLAY, F_WM,
+  F_THEME, F_ICONS, F_FONT, F_TERMINAL, F_CPU, F_GPU, F_MEMORY, F_SWAP,
+  F_DISK, F_IP, F_BATTERY, F_LOCALE, F_COLORS, F_COUNT
+};
+
+static int field_enabled[F_COUNT];
+static int field_order[F_COUNT];
+static int field_count = 0;
+static char label_color[16] = "35"; // default magenta
+
+static const struct {
+  const char *name;
+  int id;
+} field_map[] = {
+    {"os", F_OS},           {"host", F_HOST},
+    {"kernel", F_KERNEL},   {"uptime", F_UPTIME},
+    {"packages", F_PACKAGES}, {"shell", F_SHELL},
+    {"display", F_DISPLAY}, {"wm", F_WM},
+    {"theme", F_THEME},     {"icons", F_ICONS},
+    {"font", F_FONT},       {"terminal", F_TERMINAL},
+    {"cpu", F_CPU},         {"gpu", F_GPU},
+    {"memory", F_MEMORY},   {"swap", F_SWAP},
+    {"disk", F_DISK},       {"ip", F_IP},
+    {"battery", F_BATTERY}, {"locale", F_LOCALE},
+    {"colors", F_COLORS},   {NULL, 0}
+};
+
+static void config_defaults(void) {
+  // Default order
+  int defaults[] = {F_OS, F_HOST, F_KERNEL, F_UPTIME, F_PACKAGES, F_SHELL,
+                    F_DISPLAY, F_WM, F_THEME, F_ICONS, F_FONT, F_TERMINAL,
+                    F_CPU, F_GPU, F_MEMORY, F_SWAP, F_DISK, F_IP, F_BATTERY,
+                    F_LOCALE, F_COLORS};
+  field_count = sizeof(defaults) / sizeof(defaults[0]);
+  for (int i = 0; i < field_count; i++) {
+    field_order[i] = defaults[i];
+    field_enabled[defaults[i]] = 1;
+  }
+}
+
+static void load_config(void) {
+  const char *home = getenv("HOME");
+  if (!home)
+    return;
+  char path[512];
+  snprintf(path, sizeof(path), "%s/.config/fetch/config", home);
+  FILE *fp = fopen(path, "r");
+  if (!fp)
+    return;
+
+  // Config file exists — reset defaults, use file order
+  for (int i = 0; i < F_COUNT; i++)
+    field_enabled[i] = 0;
+  field_count = 0;
+
+  char buf[256];
+  while (fgets(buf, sizeof(buf), fp)) {
+    int len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' ||
+                       buf[len - 1] == ' '))
+      buf[--len] = '\0';
+    // Skip comments and empty lines
+    char *line = buf;
+    while (*line == ' ' || *line == '\t')
+      line++;
+    if (*line == '#' || *line == '\0')
+      continue;
+
+    // Check for key=value settings
+    if (strncmp(line, "label_color=", 12) == 0) {
+      char *val = line + 12;
+      // Accept color names or numbers
+      if (strcmp(val, "red") == 0) strcpy(label_color, "31");
+      else if (strcmp(val, "green") == 0) strcpy(label_color, "32");
+      else if (strcmp(val, "yellow") == 0) strcpy(label_color, "33");
+      else if (strcmp(val, "blue") == 0) strcpy(label_color, "34");
+      else if (strcmp(val, "magenta") == 0) strcpy(label_color, "35");
+      else if (strcmp(val, "cyan") == 0) strcpy(label_color, "36");
+      else if (strcmp(val, "white") == 0) strcpy(label_color, "37");
+      else strncpy(label_color, val, sizeof(label_color) - 1);
+      continue;
+    }
+
+    // Match field name
+    for (int i = 0; field_map[i].name; i++) {
+      if (strcasecmp(line, field_map[i].name) == 0) {
+        int id = field_map[i].id;
+        if (!field_enabled[id] && field_count < F_COUNT) {
+          field_enabled[id] = 1;
+          field_order[field_count++] = id;
+        }
+        break;
+      }
+    }
+  }
+  fclose(fp);
+}
+
 static void add_line(const char *line) {
   if (fetch_line_count >= MAX_FETCH_LINES)
     return;
   strncpy(fetch_lines[fetch_line_count], line, MAX_LINE_LEN - 1);
   fetch_lines[fetch_line_count][MAX_LINE_LEN - 1] = '\0';
   fetch_line_count++;
+}
+
+// Format a labeled info line using the configured label color
+static void add_info(const char *label, const char *fmt, ...) {
+  char val[MAX_LINE_LEN];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(val, sizeof(val), fmt, ap);
+  va_end(ap);
+
+  char line[MAX_LINE_LEN];
+  snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
+           val);
+  add_line(line);
 }
 
 static void gather_title(void) {
@@ -507,8 +622,8 @@ static void gather_title(void) {
   gethostname(host, sizeof(host));
 
   char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line), "\033[1;35m%s\033[0m@\033[1;35m%s\033[0m",
-           user, host);
+  snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m@\033[1;%sm%s\033[0m",
+           label_color, user, label_color, host);
   add_line(line);
 
   // separator
@@ -549,9 +664,7 @@ static void gather_os(void) {
   struct utsname u;
   uname(&u);
 
-  char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line), "\033[1;35mOS\033[0m: %s %s", pretty, u.machine);
-  add_line(line);
+  add_info("OS", "%s %s", pretty, u.machine);
 }
 
 static void gather_host(void) {
@@ -570,20 +683,14 @@ static void gather_host(void) {
     }
     fclose(fp);
   }
-  if (model[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mHost\033[0m: %s", model);
-    add_line(line);
-  }
+  if (model[0])
+    add_info("Host", "%s", model);
 }
 
 static void gather_kernel(void) {
   struct utsname u;
   uname(&u);
-  char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line), "\033[1;35mKernel\033[0m: %s %s", u.sysname,
-           u.release);
-  add_line(line);
+  add_info("Kernel", "%s %s", u.sysname, u.release);
 }
 
 static void gather_uptime(void) {
@@ -611,9 +718,7 @@ static void gather_uptime(void) {
   else
     snprintf(val, sizeof(val), "%d min%s", mins, mins == 1 ? "" : "s");
 
-  char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line), "\033[1;35mUptime\033[0m: %s", val);
-  add_line(line);
+  add_info("Uptime", "%s", val);
 }
 
 static int count_dir_entries(const char *path) {
@@ -669,11 +774,8 @@ static void gather_packages(void) {
       snprintf(val, sizeof(val), "%d (apk)", n);
   }
 
-  if (val[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mPackages\033[0m: %s", val);
-    add_line(line);
-  }
+  if (val[0])
+    add_info("Packages", "%s", val);
 }
 
 static void gather_shell(void) {
@@ -720,13 +822,10 @@ static void gather_shell(void) {
     pclose(fp);
   }
 
-  char line[MAX_LINE_LEN];
   if (version[0])
-    snprintf(line, sizeof(line), "\033[1;35mShell\033[0m: %s %s", name,
-             version);
+    add_info("Shell", "%s %s", name, version);
   else
-    snprintf(line, sizeof(line), "\033[1;35mShell\033[0m: %s", name);
-  add_line(line);
+    add_info("Shell", "%s", name);
 }
 
 static void gather_display(void) {
@@ -743,11 +842,8 @@ static void gather_display(void) {
     }
     pclose(fp);
   }
-  if (res[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mDisplay\033[0m: %s", res);
-    add_line(line);
-  }
+  if (res[0])
+    add_info("Display", "%s", res);
 }
 
 static void gather_wm(void) {
@@ -793,12 +889,8 @@ static void gather_wm(void) {
     }
   }
 
-  if (wm[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mWM\033[0m: %s%s", wm,
-             is_wayland ? " (Wayland)" : "");
-    add_line(line);
-  }
+  if (wm[0])
+    add_info("WM", "%s%s", wm, is_wayland ? " (Wayland)" : "");
 }
 
 static void gather_cpu(void) {
@@ -873,17 +965,12 @@ static void gather_cpu(void) {
   }
 
   if (name[0]) {
-    char line[MAX_LINE_LEN];
     if (cores > 0 && max_ghz > 0)
-      snprintf(line, sizeof(line),
-               "\033[1;35mCPU\033[0m: %s (%d) @ %.2f GHz", name, cores,
-               max_ghz);
+      add_info("CPU", "%s (%d) @ %.2f GHz", name, cores, max_ghz);
     else if (cores > 0)
-      snprintf(line, sizeof(line), "\033[1;35mCPU\033[0m: %s (%d)", name,
-               cores);
+      add_info("CPU", "%s (%d)", name, cores);
     else
-      snprintf(line, sizeof(line), "\033[1;35mCPU\033[0m: %s", name);
-    add_line(line);
+      add_info("CPU", "%s", name);
   }
 }
 
@@ -939,11 +1026,8 @@ static void gather_gpu(void) {
     pclose(fp);
   }
 
-  if (name[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mGPU\033[0m: %s", name);
-    add_line(line);
-  }
+  if (name[0])
+    add_info("GPU", "%s", name);
 }
 
 static void gather_memory(void) {
@@ -969,11 +1053,8 @@ static void gather_memory(void) {
   // Color: green <50%, yellow 50-79%, red 80%+
   const char *color = pct >= 80 ? "31" : pct >= 50 ? "93" : "32";
 
-  char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line),
-           "\033[1;35mMemory\033[0m: %.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)",
-           used_gib, total_gib, color, pct);
-  add_line(line);
+  add_info("Memory", "%.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)", used_gib,
+           total_gib, color, pct);
 }
 
 static void gather_swap(void) {
@@ -996,18 +1077,12 @@ static void gather_swap(void) {
   int pct = (int)(used * 100 / total);
   const char *color = pct >= 80 ? "31" : pct >= 50 ? "93" : "32";
 
-  char line[MAX_LINE_LEN];
   if (total >= 1048576)
-    snprintf(
-        line, sizeof(line),
-        "\033[1;35mSwap\033[0m: %.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)",
-        used / 1048576.0f, total / 1048576.0f, color, pct);
+    add_info("Swap", "%.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)",
+             used / 1048576.0f, total / 1048576.0f, color, pct);
   else
-    snprintf(
-        line, sizeof(line),
-        "\033[1;35mSwap\033[0m: %.2f MiB / %.2f MiB (\033[%sm%d%%\033[0m)",
-        used / 1024.0f, total / 1024.0f, color, pct);
-  add_line(line);
+    add_info("Swap", "%.2f MiB / %.2f MiB (\033[%sm%d%%\033[0m)",
+             used / 1024.0f, total / 1024.0f, color, pct);
 }
 
 static void gather_disk(void) {
@@ -1045,18 +1120,12 @@ static void gather_disk(void) {
     pclose(fp);
   }
 
-  char line[MAX_LINE_LEN];
   if (fstype[0])
-    snprintf(line, sizeof(line),
-             "\033[1;35mDisk (/)\033[0m: %.2f GiB / %.2f GiB "
-             "(\033[%sm%d%%\033[0m) - %s",
+    add_info("Disk (/)", "%.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m) - %s",
              used_gib, total_gib, color, pct, fstype);
   else
-    snprintf(line, sizeof(line),
-             "\033[1;35mDisk (/)\033[0m: %.2f GiB / %.2f GiB "
-             "(\033[%sm%d%%\033[0m)",
+    add_info("Disk (/)", "%.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)",
              used_gib, total_gib, color, pct);
-  add_line(line);
 }
 
 static void gather_battery(void) {
@@ -1185,20 +1254,13 @@ static void gather_battery(void) {
 
   if (capacity >= 0) {
     const char *color = capacity >= 50 ? "32" : capacity >= 20 ? "93" : "31";
-    char line[MAX_LINE_LEN];
     if (time_str[0] && status[0])
-      snprintf(line, sizeof(line),
-               "\033[1;35mBattery\033[0m: \033[%sm%d%%\033[0m (%s) [%s]",
-               color, capacity, time_str, status);
+      add_info("Battery", "\033[%sm%d%%\033[0m (%s) [%s]", color, capacity,
+               time_str, status);
     else if (status[0])
-      snprintf(line, sizeof(line),
-               "\033[1;35mBattery\033[0m: \033[%sm%d%%\033[0m [%s]", color,
-               capacity, status);
+      add_info("Battery", "\033[%sm%d%%\033[0m [%s]", color, capacity, status);
     else
-      snprintf(line, sizeof(line),
-               "\033[1;35mBattery\033[0m: \033[%sm%d%%\033[0m", color,
-               capacity);
-    add_line(line);
+      add_info("Battery", "\033[%sm%d%%\033[0m", color, capacity);
   }
 }
 
@@ -1220,11 +1282,8 @@ static void gather_terminal(void) {
       pclose(fp);
     }
   }
-  if (term[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mTerminal\033[0m: %s", term);
-    add_line(line);
-  }
+  if (term[0])
+    add_info("Terminal", "%s", term);
 }
 
 static void gather_ip(void) {
@@ -1264,13 +1323,13 @@ static void gather_ip(void) {
       }
     }
     if (addr[0]) {
-      char line[MAX_LINE_LEN];
-      if (iface[0])
-        snprintf(line, sizeof(line),
-                 "\033[1;35mLocal IP (%s)\033[0m: %s", iface, addr);
-      else
-        snprintf(line, sizeof(line), "\033[1;35mLocal IP\033[0m: %s", addr);
-      add_line(line);
+      if (iface[0]) {
+        char lbl[64];
+        snprintf(lbl, sizeof(lbl), "Local IP (%s)", iface);
+        add_info(lbl, "%s", addr);
+      } else {
+        add_info("Local IP", "%s", addr);
+      }
     }
   }
   pclose(fp);
@@ -1278,11 +1337,8 @@ static void gather_ip(void) {
 
 static void gather_locale(void) {
   char *lang = getenv("LANG");
-  if (lang && lang[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mLocale\033[0m: %s", lang);
-    add_line(line);
-  }
+  if (lang && lang[0])
+    add_info("Locale", "%s", lang);
 }
 
 static void read_gtk_setting(const char *key, char *out, int maxlen) {
@@ -1314,31 +1370,22 @@ static void read_gtk_setting(const char *key, char *out, int maxlen) {
 static void gather_theme(void) {
   char theme[64] = "";
   read_gtk_setting("gtk-theme-name", theme, sizeof(theme));
-  if (theme[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mTheme\033[0m: %s [GTK3]", theme);
-    add_line(line);
-  }
+  if (theme[0])
+    add_info("Theme", "%s [GTK3]", theme);
 }
 
 static void gather_icons(void) {
   char icons[64] = "";
   read_gtk_setting("gtk-icon-theme-name", icons, sizeof(icons));
-  if (icons[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mIcons\033[0m: %s [GTK3]", icons);
-    add_line(line);
-  }
+  if (icons[0])
+    add_info("Icons", "%s [GTK3]", icons);
 }
 
 static void gather_font(void) {
   char font[128] = "";
   read_gtk_setting("gtk-font-name", font, sizeof(font));
-  if (font[0]) {
-    char line[MAX_LINE_LEN];
-    snprintf(line, sizeof(line), "\033[1;35mFont\033[0m: %s [GTK3]", font);
-    add_line(line);
-  }
+  if (font[0])
+    add_info("Font", "%s [GTK3]", font);
 }
 
 // Screen buffer: each cell holds one UTF-8 codepoint (up to 4 bytes + NUL)
@@ -1601,6 +1648,8 @@ int main(int argc, char **argv) {
 
   // Parse shading ramp into codepoints
   parse_shading(shading);
+  config_defaults();
+  load_config();
 
   if (logo_name) {
     if (!load_logo_fastfetch(logo_name))
@@ -1657,31 +1706,42 @@ int main(int argc, char **argv) {
 
   if (show_info) {
     gather_title();
-    gather_os();
-    gather_host();
-    gather_kernel();
-    gather_uptime();
-    gather_packages();
-    gather_shell();
-    gather_display();
-    gather_wm();
-    gather_theme();
-    gather_icons();
-    gather_font();
-    gather_terminal();
-    gather_cpu();
-    gather_gpu();
-    gather_memory();
-    gather_swap();
-    gather_disk();
-    gather_ip();
-    gather_battery();
-    gather_locale();
-    add_line("");
-    add_line("\033[40m   \033[41m   \033[42m   \033[43m   "
-             "\033[44m   \033[45m   \033[46m   \033[47m   \033[0m");
-    add_line("\033[100m   \033[101m   \033[102m   \033[103m   "
-             "\033[104m   \033[105m   \033[106m   \033[107m   \033[0m");
+    typedef void (*gather_fn)(void);
+    gather_fn fns[F_COUNT] = {
+        [F_OS] = gather_os,
+        [F_HOST] = gather_host,
+        [F_KERNEL] = gather_kernel,
+        [F_UPTIME] = gather_uptime,
+        [F_PACKAGES] = gather_packages,
+        [F_SHELL] = gather_shell,
+        [F_DISPLAY] = gather_display,
+        [F_WM] = gather_wm,
+        [F_THEME] = gather_theme,
+        [F_ICONS] = gather_icons,
+        [F_FONT] = gather_font,
+        [F_TERMINAL] = gather_terminal,
+        [F_CPU] = gather_cpu,
+        [F_GPU] = gather_gpu,
+        [F_MEMORY] = gather_memory,
+        [F_SWAP] = gather_swap,
+        [F_DISK] = gather_disk,
+        [F_IP] = gather_ip,
+        [F_BATTERY] = gather_battery,
+        [F_LOCALE] = gather_locale,
+        [F_COLORS] = NULL,
+    };
+    for (int i = 0; i < field_count; i++) {
+      int id = field_order[i];
+      if (id == F_COLORS) {
+        add_line("");
+        add_line("\033[40m   \033[41m   \033[42m   \033[43m   "
+                 "\033[44m   \033[45m   \033[46m   \033[47m   \033[0m");
+        add_line("\033[100m   \033[101m   \033[102m   \033[103m   "
+                 "\033[104m   \033[105m   \033[106m   \033[107m   \033[0m");
+      } else if (fns[id]) {
+        fns[id]();
+      }
+    }
   }
   build_points();
   compute_threshold();
