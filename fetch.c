@@ -283,7 +283,10 @@ static int load_logo_fastfetch(const char *name) {
       continue;
     }
 
-    if (len > 0 && buf[len - 1] == ':' && logo_rows > 0) {
+    // Detect next logo header: short line ending in ':', starts with
+    // a letter, no spaces (e.g. "Fedora:" but not ":MMMMMMM:")
+    if (len > 1 && len < 40 && buf[len - 1] == ':' && logo_rows > 0 &&
+        ((buf[0] >= 'A' && buf[0] <= 'Z') || (buf[0] >= 'a' && buf[0] <= 'z'))) {
       int is_header = 1;
       for (int i = 0; i < len - 1; i++) {
         if (buf[i] == ' ') {
@@ -637,8 +640,8 @@ static void set_distro_colors(const char *distro) {
     color_outer = "\033[1;31m";
     color_inner = "\033[1;37m";
   } else if (strcasecmp(distro, "fedora-asahi-remix") == 0) {
-    color_outer = "\033[1;33m";
-    color_inner = "\033[1;32m";
+    color_outer = "\033[38;2;211;80;111m"; // asahi pink #d3506f
+    color_inner = "\033[38;2;0;166;124m";  // asahi teal #00a67c
   } else if (strcasecmp(distro, "fedora") == 0 ||
              strncasecmp(distro, "fedora-", 7) == 0) {
     color_outer = "\033[1;34m";
