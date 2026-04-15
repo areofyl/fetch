@@ -483,16 +483,76 @@ static int POINT_COUNT = 0;
 static char fetch_lines[MAX_FETCH_LINES][MAX_LINE_LEN];
 static int fetch_line_count = 0;
 
+static void add_line(const char *line) {
+  if (fetch_line_count >= MAX_FETCH_LINES)
+    return;
+  strncpy(fetch_lines[fetch_line_count], line, MAX_LINE_LEN - 1);
+  fetch_lines[fetch_line_count][MAX_LINE_LEN - 1] = '\0';
+  fetch_line_count++;
+}
+
+static void gather_title(void) {
+  char user[64] = "";
+  char host[64] = "";
+  char *login = getlogin();
+  if (login)
+    strncpy(user, login, sizeof(user) - 1);
+  else {
+    char *env = getenv("USER");
+    if (env)
+      strncpy(user, env, sizeof(user) - 1);
+  }
+  gethostname(host, sizeof(host));
+
+  char line[MAX_LINE_LEN];
+  snprintf(line, sizeof(line), "\033[1;35m%s\033[0m@\033[1;35m%s\033[0m",
+           user, host);
+  add_line(line);
+
+  // separator
+  int len = strlen(user) + 1 + strlen(host);
+  char sep[MAX_LINE_LEN];
+  if (len >= MAX_LINE_LEN)
+    len = MAX_LINE_LEN - 1;
+  memset(sep, '-', len);
+  sep[len] = '\0';
+  add_line(sep);
+}
+
 static void capture_fastfetch(void) {
   FILE *fp = popen("fastfetch --logo none --pipe false 2>/dev/null", "r");
   if (!fp)
     return;
   char buf[MAX_LINE_LEN];
+  int skip_header = 1;
   while (fetch_line_count < MAX_FETCH_LINES &&
          fgets(buf, sizeof(buf), fp) != NULL) {
     int len = strlen(buf);
     while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
       buf[--len] = '\0';
+    // Skip the first two lines (user@host + separator) from fastfetch
+    // since we generate those ourselves now
+    if (skip_header) {
+      if (len > 0 && len < 80 && buf[len - 1] != ':') {
+        // Check if line is all dashes (separator)
+        int all_dash = 1;
+        for (int i = 0; i < len; i++) {
+          if (buf[i] != '-') {
+            all_dash = 0;
+            break;
+          }
+        }
+        if (all_dash) {
+          skip_header = 0;
+          continue;
+        }
+      }
+      // Skip the user@host line too
+      if (strstr(buf, "@")) {
+        continue;
+      }
+      skip_header = 0;
+    }
     memcpy(fetch_lines[fetch_line_count], buf, len + 1);
     fetch_line_count++;
   }
@@ -813,8 +873,10 @@ int main(int argc, char **argv) {
   if (distro[0])
     set_distro_colors(distro);
 
-  if (show_info)
+  if (show_info) {
+    gather_title();
     capture_fastfetch();
+  }
   build_points();
   compute_threshold();
 
