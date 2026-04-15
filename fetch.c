@@ -728,6 +728,78 @@ static void gather_shell(void) {
   add_line(line);
 }
 
+static void gather_display(void) {
+  char res[64] = "";
+  // Try DRM modes
+  FILE *fp = popen("cat /sys/class/drm/card*/modes 2>/dev/null", "r");
+  if (fp) {
+    char buf[64];
+    if (fgets(buf, sizeof(buf), fp)) {
+      int len = strlen(buf);
+      while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+        buf[--len] = '\0';
+      strncpy(res, buf, sizeof(res) - 1);
+    }
+    pclose(fp);
+  }
+  if (res[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mDisplay\033[0m: %s", res);
+    add_line(line);
+  }
+}
+
+static void gather_wm(void) {
+  // Check WAYLAND_DISPLAY or XDG_SESSION_TYPE to determine session type
+  char *wayland = getenv("WAYLAND_DISPLAY");
+  char *session = getenv("XDG_SESSION_TYPE");
+  char *desktop = getenv("XDG_CURRENT_DESKTOP");
+  int is_wayland = (wayland && wayland[0]) ||
+                   (session && strcmp(session, "wayland") == 0);
+
+  // Try to figure out the WM name
+  char wm[64] = "";
+  if (desktop && desktop[0]) {
+    strncpy(wm, desktop, sizeof(wm) - 1);
+  } else {
+    // Try common WM env vars / process detection
+    char *swaysock = getenv("SWAYSOCK");
+    char *hyprland = getenv("HYPRLAND_INSTANCE_SIGNATURE");
+    if (swaysock)
+      strcpy(wm, "sway");
+    else if (hyprland)
+      strcpy(wm, "Hyprland");
+    else {
+      // Try process list for known WMs
+      FILE *fp = popen("ps -e -o comm= 2>/dev/null", "r");
+      if (fp) {
+        char buf[64];
+        while (fgets(buf, sizeof(buf), fp)) {
+          int len = strlen(buf);
+          while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+            buf[--len] = '\0';
+          if (strcmp(buf, "dwl") == 0 || strcmp(buf, "sway") == 0 ||
+              strcmp(buf, "river") == 0 || strcmp(buf, "labwc") == 0 ||
+              strcmp(buf, "weston") == 0 || strcmp(buf, "i3") == 0 ||
+              strcmp(buf, "bspwm") == 0 || strcmp(buf, "openbox") == 0 ||
+              strcmp(buf, "awesome") == 0 || strcmp(buf, "dwm") == 0) {
+            strncpy(wm, buf, sizeof(wm) - 1);
+            break;
+          }
+        }
+        pclose(fp);
+      }
+    }
+  }
+
+  if (wm[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mWM\033[0m: %s%s", wm,
+             is_wayland ? " (Wayland)" : "");
+    add_line(line);
+  }
+}
+
 static void capture_fastfetch(void) {
   FILE *fp = popen("fastfetch --logo none --pipe false 2>/dev/null", "r");
   if (!fp)
@@ -776,7 +848,8 @@ static void capture_fastfetch(void) {
     }
     if (strncmp(p, "OS", 2) == 0 || strncmp(p, "Host", 4) == 0 ||
         strncmp(p, "Kernel", 6) == 0 || strncmp(p, "Uptime", 6) == 0 ||
-        strncmp(p, "Packages", 8) == 0 || strncmp(p, "Shell", 5) == 0)
+        strncmp(p, "Packages", 8) == 0 || strncmp(p, "Shell", 5) == 0 ||
+        strncmp(p, "Display", 7) == 0 || strncmp(p, "WM", 2) == 0)
       continue;
 
     memcpy(fetch_lines[fetch_line_count], buf, len + 1);
@@ -1107,6 +1180,8 @@ int main(int argc, char **argv) {
     gather_uptime();
     gather_packages();
     gather_shell();
+    gather_display();
+    gather_wm();
     capture_fastfetch();
   }
   build_points();
