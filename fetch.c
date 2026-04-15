@@ -1757,32 +1757,33 @@ int main(int argc, char **argv) {
   if (distro[0])
     set_distro_colors(distro);
 
+  typedef void (*gather_fn)(void);
+  gather_fn fns[F_COUNT] = {
+      [F_OS] = gather_os,
+      [F_HOST] = gather_host,
+      [F_KERNEL] = gather_kernel,
+      [F_UPTIME] = gather_uptime,
+      [F_PACKAGES] = gather_packages,
+      [F_SHELL] = gather_shell,
+      [F_DISPLAY] = gather_display,
+      [F_WM] = gather_wm,
+      [F_THEME] = gather_theme,
+      [F_ICONS] = gather_icons,
+      [F_FONT] = gather_font,
+      [F_TERMINAL] = gather_terminal,
+      [F_CPU] = gather_cpu,
+      [F_GPU] = gather_gpu,
+      [F_MEMORY] = gather_memory,
+      [F_SWAP] = gather_swap,
+      [F_DISK] = gather_disk,
+      [F_IP] = gather_ip,
+      [F_BATTERY] = gather_battery,
+      [F_LOCALE] = gather_locale,
+      [F_COLORS] = NULL,
+  };
+
   if (show_info) {
     gather_title();
-    typedef void (*gather_fn)(void);
-    gather_fn fns[F_COUNT] = {
-        [F_OS] = gather_os,
-        [F_HOST] = gather_host,
-        [F_KERNEL] = gather_kernel,
-        [F_UPTIME] = gather_uptime,
-        [F_PACKAGES] = gather_packages,
-        [F_SHELL] = gather_shell,
-        [F_DISPLAY] = gather_display,
-        [F_WM] = gather_wm,
-        [F_THEME] = gather_theme,
-        [F_ICONS] = gather_icons,
-        [F_FONT] = gather_font,
-        [F_TERMINAL] = gather_terminal,
-        [F_CPU] = gather_cpu,
-        [F_GPU] = gather_gpu,
-        [F_MEMORY] = gather_memory,
-        [F_SWAP] = gather_swap,
-        [F_DISK] = gather_disk,
-        [F_IP] = gather_ip,
-        [F_BATTERY] = gather_battery,
-        [F_LOCALE] = gather_locale,
-        [F_COLORS] = NULL,
-    };
     for (int i = 0; i < field_count; i++) {
       int id = field_order[i];
       if (id == F_COLORS) {
@@ -1841,6 +1842,24 @@ int main(int argc, char **argv) {
     struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
     if (poll(&pfd, 1, 0) > 0)
       break;
+    // Refresh dynamic info every ~1 second (20 frames)
+    if (show_info && frame > 0 && frame % 20 == 0) {
+      fetch_line_count = 0;
+      gather_title();
+      for (int i = 0; i < field_count; i++) {
+        int id = field_order[i];
+        if (id == F_COLORS) {
+          add_line("");
+          add_line("\033[40m   \033[41m   \033[42m   \033[43m   "
+                   "\033[44m   \033[45m   \033[46m   \033[47m   \033[0m");
+          add_line("\033[100m   \033[101m   \033[102m   \033[103m   "
+                   "\033[104m   \033[105m   \033[106m   \033[107m   \033[0m");
+        } else if (fns[id]) {
+          fns[id]();
+        }
+      }
+    }
+
     clear_buf();
     A += rotate_x ? 0.04f * speed : 0.0f;
     B += rotate_y ? 0.06f * speed : 0.0f;
