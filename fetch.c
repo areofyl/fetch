@@ -308,31 +308,48 @@ static int load_logo_fastfetch(const char *name) {
   return logo_rows > 0;
 }
 
+// Parse a value from os-release, stripping quotes and newlines
+static int parse_os_release_val(const char *buf, int prefix_len, char *out,
+                                int maxlen) {
+  int len = strlen(buf);
+  char tmp[256];
+  if (len - prefix_len >= (int)sizeof(tmp))
+    return 0;
+  memcpy(tmp, buf + prefix_len, len - prefix_len + 1);
+  len = strlen(tmp);
+  while (len > 0 && (tmp[len - 1] == '\n' || tmp[len - 1] == '\r'))
+    tmp[--len] = '\0';
+  char *val = tmp;
+  if (*val == '"')
+    val++;
+  len = strlen(val);
+  if (len > 0 && val[len - 1] == '"')
+    val[--len] = '\0';
+  if (len > 0 && len < maxlen) {
+    memcpy(out, val, len + 1);
+    return 1;
+  }
+  return 0;
+}
+
+// Detect distro from /etc/os-release. Also fills id_like as fallback.
+static char distro_id_like[64] = "";
+
 static int detect_distro(char *out, int maxlen) {
   FILE *fp = fopen("/etc/os-release", "r");
   if (!fp)
     return 0;
   char buf[256];
+  int found_id = 0;
   while (fgets(buf, sizeof(buf), fp)) {
-    if (strncmp(buf, "ID=", 3) == 0) {
-      int len = strlen(buf);
-      while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-        buf[--len] = '\0';
-      char *val = buf + 3;
-      if (*val == '"')
-        val++;
-      len = strlen(val);
-      if (len > 0 && val[len - 1] == '"')
-        val[--len] = '\0';
-      if (len > 0 && len < maxlen) {
-        memcpy(out, val, len + 1);
-        fclose(fp);
-        return 1;
-      }
+    if (!found_id && strncmp(buf, "ID=", 3) == 0) {
+      found_id = parse_os_release_val(buf, 3, out, maxlen);
+    } else if (strncmp(buf, "ID_LIKE=", 8) == 0) {
+      parse_os_release_val(buf, 8, distro_id_like, sizeof(distro_id_like));
     }
   }
   fclose(fp);
-  return 0;
+  return found_id;
 }
 
 static void load_default_logo(void) {
@@ -643,10 +660,25 @@ int main(int argc, char **argv) {
       load_default_logo();
     strncpy(distro, logo_name, sizeof(distro) - 1);
   } else if (!load_logo_file()) {
-    if (detect_distro(distro, sizeof(distro)))
-      if (!load_logo_fastfetch(distro))
-        load_default_logo();
-    if (logo_rows == 0)
+    int got_logo = 0;
+    if (detect_distro(distro, sizeof(distro))) {
+      got_logo = load_logo_fastfetch(distro);
+      // Try ID_LIKE as fallback (e.g. Proxmox ID=debian but ID_LIKE=debian)
+      if (!got_logo && distro_id_like[0]) {
+        // ID_LIKE can have multiple space-separated values
+        char like_copy[64];
+        strncpy(like_copy, distro_id_like, sizeof(like_copy) - 1);
+        like_copy[sizeof(like_copy) - 1] = '\0';
+        char *tok = strtok(like_copy, " ");
+        while (tok && !got_logo) {
+          got_logo = load_logo_fastfetch(tok);
+          if (got_logo)
+            strncpy(distro, tok, sizeof(distro) - 1);
+          tok = strtok(NULL, " ");
+        }
+      }
+    }
+    if (!got_logo)
       load_default_logo();
   } else {
     if (file_distro[0])
