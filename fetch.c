@@ -1822,7 +1822,10 @@ int main(int argc, char **argv) {
   signal(SIGTERM, handle_signal);
   atexit(cleanup);
 
-  int fetch_start = 1;
+  // Center info vertically
+  int fetch_start = (render_height - fetch_line_count) / 2;
+  if (fetch_start < 0)
+    fetch_start = 0;
 
   if (tcgetattr(STDIN_FILENO, &orig_termios) == 0) {
     termios_saved = 1;
@@ -1875,7 +1878,7 @@ int main(int argc, char **argv) {
         continue;
       float ooz = 1.0f / zc;
       int xs = (int)((float)ANIM_WIDTH * 0.5f + K1 * 2.0f * x2 * ooz);
-      int ys = (int)((float)render_height * 0.45f - K1 * y2 * ooz);
+      int ys = (int)((float)render_height * 0.5f - K1 * y2 * ooz);
       if (xs < 0 || xs >= ANIM_WIDTH || ys < 0 || ys >= render_height)
         continue;
 
