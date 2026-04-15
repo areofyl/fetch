@@ -109,7 +109,7 @@ static void process_logo_row(int row) {
           num = num * 10 + (p[i] - '0');
           has_num = 1;
         } else if (p[i] == ';') {
-          if (has_num && ((num >= 30 && num <= 37) || (num >= 90 && num <= 97)))
+          if (has_num && ((num >= 30 && num <= 37) || num == 39 || (num >= 90 && num <= 97)))
             cur_color = num;
           if (has_num && num == 0)
             cur_color = 0;
@@ -118,7 +118,7 @@ static void process_logo_row(int row) {
         }
         i++;
       }
-      if (has_num && ((num >= 30 && num <= 37) || (num >= 90 && num <= 97)))
+      if (has_num && ((num >= 30 && num <= 37) || num == 39 || (num >= 90 && num <= 97)))
         cur_color = num;
       if (has_num && num == 0)
         cur_color = 0;
@@ -304,6 +304,7 @@ static int load_logo_fastfetch(const char *name) {
       buf[--len] = '\0';
 
     // Truncate at first cursor movement escape (marks end of logo content)
+    int truncated = 0;
     for (int i = 0; i < len - 2; i++) {
       if (is_cursor_escape(&buf[i])) {
         // Strip preceding \033[m or \033[0m reset too
@@ -316,13 +317,16 @@ static int load_logo_fastfetch(const char *name) {
           cut -= 4;
         buf[cut] = '\0';
         len = cut;
+        truncated = 1;
         break;
       }
     }
 
     if (len == 0 && logo_rows == 0)
       continue;
-    if (len == 0)
+    // Only stop on empty lines caused by cursor escapes (system info),
+    // not blank lines that are part of the logo
+    if (len == 0 && truncated)
       break;
 
     memcpy(logo_data[logo_rows], buf, len + 1);
