@@ -1,30 +1,39 @@
 # fetch
 
-An animated 3D fetch tool for your terminal. Takes your distro's ASCII logo,
-turns it into a spinning 3D object, and displays system info alongside it.
+A donut.c-inspired fetch tool that spins your distro logo in 3D.
 
 ![demo](demo.gif)
 
-Built on top of [gentoo.c](https://github.com/areofyl/gentoo.c) and
-[fastfetch](https://github.com/fastfetch-cli/fastfetch).
+Takes any ASCII/Unicode distro logo, turns each character into a point cloud
+based on its visual density, and renders it as a rotating 3D relief with
+Blinn-Phong shading. System info from [fastfetch](https://github.com/fastfetch-cli/fastfetch)
+is shown alongside it.
 
-## Build
+Based on [gentoo.c](https://github.com/areofyl/gentoo.c).
+
+## Build & run
 
 ```
 make
-```
-
-## Run
-
-```
 ./fetch
 ```
 
-Any keypress stops the animation. Ctrl-C also works.
+Press any key to stop — the keypress passes through to the shell, so it
+works as a startup fetch. Ctrl-C works too.
 
-## Custom logo
+## Logos
 
-Put ASCII art in `~/.config/fetch/logo.txt`. Add a header line to set colors:
+By default it auto-detects your distro and grabs the logo from fastfetch.
+Works with any distro, including Unicode logos (NixOS, etc.).
+
+You can also specify one directly:
+
+```
+./fetch -l arch
+./fetch -l NixOS
+```
+
+Or drop a custom logo in `~/.config/fetch/logo.txt`:
 
 ```
 # distro: gentoo
@@ -33,43 +42,34 @@ Put ASCII art in `~/.config/fetch/logo.txt`. Add a header line to set colors:
 ...
 ```
 
-Supported distro color schemes: gentoo, arch, ubuntu, debian, fedora,
-fedora-asahi-remix, nixos, void, alpine, opensuse.
-
-You can also pass `--logo <name>` / `-l <name>` to pull any logo from fastfetch:
-
-```
-./fetch -l arch
-```
-
-Without a config file or flag, it auto-detects your distro from `/etc/os-release`.
+The `# distro:` header sets the color scheme. Supported schemes: gentoo,
+arch, ubuntu, debian, fedora, fedora-asahi-remix, nixos, void, alpine,
+opensuse.
 
 ## Options
 
 | Flag | Description |
 |------|-------------|
 | `-l`, `--logo <name>` | Use a logo from fastfetch by name |
-| `--rotate-x` | Only rotate on the X axis |
-| `--rotate-y` | Only rotate on the Y axis |
-| `-s`, `--speed <float>` | Rotation speed multiplier (default 1.0) |
-| `--no-info` | Hide system info, only show the logo |
-| `--no-color` | Disable logo coloring |
+| `--rotate-x` | Lock rotation to X axis only |
+| `--rotate-y` | Lock rotation to Y axis only |
+| `-s`, `--speed <float>` | Speed multiplier (default 1.0) |
+| `--no-info` | Just the logo, no system info |
+| `--no-color` | Disable coloring |
 | `--frames <n>` | Stop after n frames |
-| `--infinite` | Never auto-stop (keypress or Ctrl-C to exit) |
-| `--shading-chars <str>` | Custom ASCII shading ramp (default `".,-~:;=!*#$@"`) |
+| `--infinite` | Run forever |
+| `--shading-chars <str>` | Custom shading ramp, supports UTF-8 (default `.,-~:;=!*#$@`) |
+| `-h`, `--help` | Show help |
 
-fastfetch is optional — without it, fetch shows just the spinning logo with no
-system info. The `--logo` flag and auto-detection also need fastfetch; without it,
-use `~/.config/fetch/logo.txt` or the built-in Gentoo logo.
+fastfetch is optional — without it you just get the spinning logo.
 
 ## How it works
 
-- Reads an ASCII logo (from config, fastfetch, or built-in)
-- Each character's visual density maps to a height value, creating a 3D relief
-- Surface normals are derived from the height field gradient
-- Blinn-Phong shading with diffuse + specular highlights
-- Every frame: rotate, project with perspective, z-buffer, and shade
-- System info is captured from fastfetch and drawn alongside the animation
+Each character in the logo gets a weight based on its visual density — `M` is
+heavy, `.` is light, `█` is full, `░` is thin. That weight becomes a height,
+turning the flat logo into a 3D relief. Surface normals come from the height
+gradient, and everything gets rotated + projected + shaded every frame with a
+z-buffer. ~700 lines of C, no deps beyond libm.
 
 ## Install
 
@@ -77,4 +77,4 @@ use `~/.config/fetch/logo.txt` or the built-in Gentoo logo.
 sudo make install
 ```
 
-Installs to `/usr/local/bin` by default. Override with `PREFIX=~/.local make install`.
+`PREFIX=~/.local make install` if you don't want it system-wide.
