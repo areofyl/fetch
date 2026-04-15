@@ -28,15 +28,194 @@ static void handle_signal(int sig) {
 #define GAP 2
 #define PI 3.14159265f
 
-// Dynamic logo storage
+// --- UTF-8 helpers ---
+
+// Returns byte length of a UTF-8 sequence from its leading byte
+static int utf8_char_len(unsigned char c) {
+  if (c < 0x80) return 1;
+  if ((c & 0xE0) == 0xC0) return 2;
+  if ((c & 0xF0) == 0xE0) return 3;
+  if ((c & 0xF8) == 0xF0) return 4;
+  return 1; // invalid, treat as 1
+}
+
+// Skip past an ANSI escape sequence (ESC [ ... letter)
+// Returns number of bytes to skip, or 0 if not an escape
+static int skip_ansi(const char *p) {
+  if (p[0] != '\033' || p[1] != '[')
+    return 0;
+  int i = 2;
+  while (p[i] && ((p[i] >= '0' && p[i] <= '9') || p[i] == ';'))
+    i++;
+  if (p[i])
+    i++; // skip the final letter
+  return i;
+}
+
+// Parse a UTF-8 string into individual codepoints
+#define MAX_SHADING 64
+static char shading_chars[MAX_SHADING][5];
+static int shading_count = 0;
+
+static void parse_shading(const char *str) {
+  shading_count = 0;
+  const char *p = str;
+  while (*p && shading_count < MAX_SHADING) {
+    int len = utf8_char_len((unsigned char)*p);
+    if (len > 4) len = 4;
+    // Make sure we don't read past end of string
+    int actual = 0;
+    while (actual < len && p[actual])
+      actual++;
+    memcpy(shading_chars[shading_count], p, actual);
+    shading_chars[shading_count][actual] = '\0';
+    shading_count++;
+    p += actual;
+  }
+  if (shading_count == 0) {
+    // Fallback
+    strcpy(shading_chars[0], ".");
+    shading_count = 1;
+  }
+}
+
+// --- Logo storage (codepoint-aware) ---
+
 #define MAX_LOGO_ROWS 64
 #define MAX_LOGO_COLS 128
-static char logo_data[MAX_LOGO_ROWS][MAX_LOGO_COLS];
+// Raw byte data
+static char logo_data[MAX_LOGO_ROWS][512];
+// Parsed per-cell codepoints
+static char logo_cells[MAX_LOGO_ROWS][MAX_LOGO_COLS][5];
+static int logo_cell_counts[MAX_LOGO_ROWS];
 static int logo_rows = 0;
 static int logo_cols = 0;
 
-// Try loading logo from ~/.config/fetch/logo.txt
-// First line can be "# distro: <name>" to set color scheme
+// Process a logo row: split into codepoints, skipping ANSI escapes
+static void process_logo_row(int row) {
+  const char *p = logo_data[row];
+  int col = 0;
+  while (*p && col < MAX_LOGO_COLS) {
+    // Skip ANSI escapes
+    int skip = skip_ansi(p);
+    if (skip > 0) {
+      p += skip;
+      continue;
+    }
+    int len = utf8_char_len((unsigned char)*p);
+    int actual = 0;
+    while (actual < len && p[actual])
+      actual++;
+    memcpy(logo_cells[row][col], p, actual);
+    logo_cells[row][col][actual] = '\0';
+    col++;
+    p += actual;
+  }
+  logo_cell_counts[row] = col;
+  if (col > logo_cols)
+    logo_cols = col;
+}
+
+// Process all loaded logo rows
+static void process_logo(void) {
+  logo_cols = 0;
+  for (int r = 0; r < logo_rows; r++)
+    process_logo_row(r);
+}
+
+// --- char_weight for UTF-8 codepoints ---
+
+static float char_weight_utf8(const char *ch) {
+  // Single-byte ASCII
+  if ((unsigned char)ch[0] < 0x80) {
+    switch (ch[0]) {
+    case 'M': return 1.00f;
+    case 'N': return 0.88f;
+    case 'm': return 0.76f;
+    case 'd': return 0.66f;
+    case 'h': return 0.56f;
+    case 'b': return 0.56f;
+    case 'y': return 0.46f;
+    case 'o': return 0.38f;
+    case 'n': return 0.38f;
+    case 's': return 0.30f;
+    case '+': return 0.22f;
+    case ':': return 0.18f;
+    case '=': return 0.22f;
+    case '-': return 0.14f;
+    case '`': return 0.08f;
+    case '.': return 0.10f;
+    case '/': return 0.12f;
+    case '\'': return 0.06f;
+    case ' ': return 0.0f;
+    default:
+      // Generic: uppercase heavy, lowercase medium, punct light
+      if (ch[0] >= 'A' && ch[0] <= 'Z') return 0.80f;
+      if (ch[0] >= 'a' && ch[0] <= 'z') return 0.50f;
+      if (ch[0] >= '0' && ch[0] <= '9') return 0.40f;
+      return 0.15f;
+    }
+  }
+
+  // Multi-byte UTF-8: compare raw bytes for common block elements
+  // Full block U+2588: E2 96 88
+  if (memcmp(ch, "\xe2\x96\x88", 3) == 0) return 1.00f;
+  // Dark shade U+2593: E2 96 93
+  if (memcmp(ch, "\xe2\x96\x93", 3) == 0) return 0.75f;
+  // Medium shade U+2592: E2 96 92
+  if (memcmp(ch, "\xe2\x96\x92", 3) == 0) return 0.50f;
+  // Light shade U+2591: E2 96 91
+  if (memcmp(ch, "\xe2\x96\x91", 3) == 0) return 0.25f;
+
+  // Half blocks (U+2580-258F)
+  // Upper half U+2580: E2 96 80
+  if (memcmp(ch, "\xe2\x96\x80", 3) == 0) return 0.50f;
+  // Lower half U+2584: E2 96 84
+  if (memcmp(ch, "\xe2\x96\x84", 3) == 0) return 0.50f;
+  // Left half U+258C: E2 96 8C
+  if (memcmp(ch, "\xe2\x96\x8c", 3) == 0) return 0.50f;
+  // Right half U+2590: E2 96 90
+  if (memcmp(ch, "\xe2\x96\x90", 3) == 0) return 0.50f;
+
+  // 3/4 blocks
+  // U+259B ▛: E2 96 9B
+  if (memcmp(ch, "\xe2\x96\x9b", 3) == 0) return 0.75f;
+  // U+259C ▜: E2 96 9C
+  if (memcmp(ch, "\xe2\x96\x9c", 3) == 0) return 0.75f;
+  // U+2599 ▙: E2 96 99
+  if (memcmp(ch, "\xe2\x96\x99", 3) == 0) return 0.75f;
+  // U+259F ▟: E2 96 9F
+  if (memcmp(ch, "\xe2\x96\x9f", 3) == 0) return 0.75f;
+
+  // 1/4 blocks
+  // U+2596 ▖: E2 96 96
+  if (memcmp(ch, "\xe2\x96\x96", 3) == 0) return 0.25f;
+  // U+2597 ▗: E2 96 97
+  if (memcmp(ch, "\xe2\x96\x97", 3) == 0) return 0.25f;
+  // U+2598 ▘: E2 96 98
+  if (memcmp(ch, "\xe2\x96\x98", 3) == 0) return 0.25f;
+  // U+259D ▝: E2 96 9D
+  if (memcmp(ch, "\xe2\x96\x9d", 3) == 0) return 0.25f;
+
+  // Box drawing chars (U+2500-257F): E2 94 xx / E2 95 xx
+  if ((unsigned char)ch[0] == 0xe2 &&
+      ((unsigned char)ch[1] == 0x94 || (unsigned char)ch[1] == 0x95))
+    return 0.20f;
+
+  // Braille (U+2800-28FF): E2 A0-A3 xx
+  if ((unsigned char)ch[0] == 0xe2 &&
+      (unsigned char)ch[1] >= 0xa0 && (unsigned char)ch[1] <= 0xa3) {
+    // Weight by number of dots (popcount of last byte)
+    unsigned char b = (unsigned char)ch[2];
+    int dots = 0;
+    while (b) { dots += b & 1; b >>= 1; }
+    return dots / 8.0f;
+  }
+
+  // Default for unknown multi-byte: treat as medium fill
+  return 0.30f;
+}
+
 static char file_distro[64] = "";
 
 static int load_logo_file(void) {
@@ -49,12 +228,11 @@ static int load_logo_file(void) {
   if (!fp)
     return 0;
 
-  char buf[MAX_LOGO_COLS];
+  char buf[512];
   while (logo_rows < MAX_LOGO_ROWS && fgets(buf, sizeof(buf), fp)) {
     int len = strlen(buf);
     while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
       buf[--len] = '\0';
-    // Parse "# distro: <name>" header
     if (logo_rows == 0 && strncmp(buf, "# distro:", 9) == 0) {
       char *val = buf + 9;
       while (*val == ' ')
@@ -65,8 +243,6 @@ static int load_logo_file(void) {
     if (len == 0 && logo_rows == 0)
       continue;
     memcpy(logo_data[logo_rows], buf, len + 1);
-    if (len > logo_cols)
-      logo_cols = len;
     logo_rows++;
   }
   fclose(fp);
@@ -75,7 +251,6 @@ static int load_logo_file(void) {
   return logo_rows > 0;
 }
 
-// Extract logo from fastfetch for a given distro name
 static int load_logo_fastfetch(const char *name) {
   char cmd[256];
   snprintf(cmd, sizeof(cmd),
@@ -83,19 +258,14 @@ static int load_logo_fastfetch(const char *name) {
   FILE *fp = popen(cmd, "r");
   if (!fp)
     return 0;
-
-  // fastfetch prints the logo on the left side of the output
-  // We need to extract just the logo portion (before the info text)
-  // Simpler: use --print-logos to get the raw logo
   pclose(fp);
 
-  snprintf(cmd, sizeof(cmd),
-           "fastfetch --print-logos 2>/dev/null");
+  snprintf(cmd, sizeof(cmd), "fastfetch --print-logos 2>/dev/null");
   fp = popen(cmd, "r");
   if (!fp)
     return 0;
 
-  char buf[MAX_LOGO_COLS];
+  char buf[512];
   int found = 0;
   int name_len = strlen(name);
 
@@ -105,7 +275,6 @@ static int load_logo_fastfetch(const char *name) {
       buf[--len] = '\0';
 
     if (!found) {
-      // Look for "Name:" line
       if (len > 0 && len <= name_len + 1 && buf[len - 1] == ':') {
         buf[len - 1] = '\0';
         if (strcasecmp(buf, name) == 0)
@@ -114,9 +283,7 @@ static int load_logo_fastfetch(const char *name) {
       continue;
     }
 
-    // We're inside the logo — stop at next "Name:" or empty after content
     if (len > 0 && buf[len - 1] == ':' && logo_rows > 0) {
-      // Check if this looks like a new logo header (no spaces before colon)
       int is_header = 1;
       for (int i = 0; i < len - 1; i++) {
         if (buf[i] == ' ') {
@@ -132,19 +299,15 @@ static int load_logo_fastfetch(const char *name) {
       break;
 
     memcpy(logo_data[logo_rows], buf, len + 1);
-    if (len > logo_cols)
-      logo_cols = len;
     logo_rows++;
   }
   pclose(fp);
 
-  // Trim trailing blank rows
   while (logo_rows > 0 && logo_data[logo_rows - 1][0] == '\0')
     logo_rows--;
   return logo_rows > 0;
 }
 
-// Detect distro name from /etc/os-release
 static int detect_distro(char *out, int maxlen) {
   FILE *fp = fopen("/etc/os-release", "r");
   if (!fp)
@@ -156,7 +319,6 @@ static int detect_distro(char *out, int maxlen) {
       while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
         buf[--len] = '\0';
       char *val = buf + 3;
-      // Strip quotes
       if (*val == '"')
         val++;
       len = strlen(val);
@@ -173,7 +335,6 @@ static int detect_distro(char *out, int maxlen) {
   return 0;
 }
 
-// Default Gentoo logo fallback
 static void load_default_logo(void) {
   static const char *gentoo[] = {
       "         -/oyddmdhs+:.            ",
@@ -196,12 +357,9 @@ static void load_default_logo(void) {
       "  `-//////:--.                     ",
   };
   logo_rows = 18;
-  logo_cols = 34;
   for (int i = 0; i < logo_rows; i++) {
     int len = strlen(gentoo[i]);
     memcpy(logo_data[i], gentoo[i], len + 1);
-    if (len > logo_cols)
-      logo_cols = len;
   }
 }
 
@@ -233,57 +391,16 @@ static void capture_fastfetch(void) {
   pclose(fp);
 }
 
-static float char_weight(char ch) {
-  switch (ch) {
-  case 'M':
-    return 1.00f;
-  case 'N':
-    return 0.88f;
-  case 'm':
-    return 0.76f;
-  case 'd':
-    return 0.66f;
-  case 'h':
-    return 0.56f;
-  case 'b':
-    return 0.56f;
-  case 'y':
-    return 0.46f;
-  case 'o':
-    return 0.38f;
-  case 'n':
-    return 0.38f;
-  case 's':
-    return 0.30f;
-  case '+':
-    return 0.22f;
-  case ':':
-    return 0.18f;
-  case '=':
-    return 0.22f;
-  case '-':
-    return 0.14f;
-  case '`':
-    return 0.08f;
-  case '.':
-    return 0.10f;
-  case '/':
-    return 0.12f;
-  case '\'':
-    return 0.06f;
-  default:
-    return 0.0f;
-  }
-}
-
-static char screen[HEIGHT][ANIM_WIDTH];
+// Screen buffer: each cell holds one UTF-8 codepoint (up to 4 bytes + NUL)
+static char screen[HEIGHT][ANIM_WIDTH][5];
 static float zbuf[HEIGHT][ANIM_WIDTH];
 static int colorbuf[HEIGHT][ANIM_WIDTH];
 
 static void clear_buf(void) {
   for (int i = 0; i < HEIGHT; i++)
     for (int j = 0; j < ANIM_WIDTH; j++) {
-      screen[i][j] = ' ';
+      screen[i][j][0] = ' ';
+      screen[i][j][1] = '\0';
       zbuf[i][j] = -1e9f;
       colorbuf[i][j] = 0;
     }
@@ -299,10 +416,11 @@ static void build_points(void) {
 
   float hmap[MAX_LOGO_ROWS][MAX_LOGO_COLS];
   for (int r = 0; r < logo_rows; r++) {
-    int len = strlen(logo_data[r]);
     for (int c = 0; c < logo_cols; c++) {
-      char ch = (c < len) ? logo_data[r][c] : ' ';
-      hmap[r][c] = char_weight(ch);
+      if (c < logo_cell_counts[r])
+        hmap[r][c] = char_weight_utf8(logo_cells[r][c]);
+      else
+        hmap[r][c] = 0.0f;
     }
   }
 
@@ -416,7 +534,6 @@ static int float_cmp(const void *a, const void *b) {
 static void compute_threshold(void) {
   if (POINT_COUNT == 0)
     return;
-  // Sort a copy of weights to find the median
   float *sorted = malloc(POINT_COUNT * sizeof(float));
   if (!sorted)
     return;
@@ -430,53 +547,51 @@ static void compute_threshold(void) {
 static const char *color_inner = "\033[1;37m";
 static const char *color_outer = "\033[1;35m";
 
-// Distro color schemes: [outer, inner]
 static void set_distro_colors(const char *distro) {
   if (strcasecmp(distro, "gentoo") == 0) {
-    color_outer = "\033[1;35m"; // bold magenta
-    color_inner = "\033[1;37m"; // bold white
+    color_outer = "\033[1;35m";
+    color_inner = "\033[1;37m";
   } else if (strcasecmp(distro, "arch") == 0) {
-    color_outer = "\033[1;36m"; // bold cyan
-    color_inner = "\033[1;36m"; // bold cyan
+    color_outer = "\033[1;36m";
+    color_inner = "\033[1;36m";
   } else if (strcasecmp(distro, "ubuntu") == 0) {
-    color_outer = "\033[1;31m"; // bold red
-    color_inner = "\033[1;37m"; // bold white
+    color_outer = "\033[1;31m";
+    color_inner = "\033[1;37m";
   } else if (strcasecmp(distro, "debian") == 0) {
-    color_outer = "\033[1;31m"; // bold red
-    color_inner = "\033[1;37m"; // bold white
+    color_outer = "\033[1;31m";
+    color_inner = "\033[1;37m";
   } else if (strcasecmp(distro, "fedora-asahi-remix") == 0) {
-    color_outer = "\033[1;33m"; // bold yellow
-    color_inner = "\033[1;32m"; // bold green
+    color_outer = "\033[1;33m";
+    color_inner = "\033[1;32m";
   } else if (strcasecmp(distro, "fedora") == 0 ||
              strncasecmp(distro, "fedora-", 7) == 0) {
-    color_outer = "\033[1;34m"; // bold blue
-    color_inner = "\033[1;37m"; // bold white
+    color_outer = "\033[1;34m";
+    color_inner = "\033[1;37m";
   } else if (strcasecmp(distro, "nixos") == 0) {
-    color_outer = "\033[1;34m"; // bold blue
-    color_inner = "\033[1;36m"; // bold cyan
+    color_outer = "\033[1;34m";
+    color_inner = "\033[1;36m";
   } else if (strcasecmp(distro, "void") == 0) {
-    color_outer = "\033[1;32m"; // bold green
-    color_inner = "\033[1;32m"; // bold green
+    color_outer = "\033[1;32m";
+    color_inner = "\033[1;32m";
   } else if (strcasecmp(distro, "alpine") == 0) {
-    color_outer = "\033[1;34m"; // bold blue
-    color_inner = "\033[1;37m"; // bold white
+    color_outer = "\033[1;34m";
+    color_inner = "\033[1;37m";
   } else if (strcasecmp(distro, "opensuse-tumbleweed") == 0 ||
              strcasecmp(distro, "opensuse-leap") == 0 ||
              strcasecmp(distro, "opensuse") == 0) {
-    color_outer = "\033[1;32m"; // bold green
-    color_inner = "\033[1;37m"; // bold white
+    color_outer = "\033[1;32m";
+    color_inner = "\033[1;37m";
   }
 }
 
 int main(int argc, char **argv) {
-  // Load logo: --logo <name> flag, or ~/.config/fetch/logo.txt, or auto-detect
   char distro[64] = "";
   const char *logo_name = NULL;
   int rotate_x = 1, rotate_y = 1;
   float speed = 1.0f;
   int show_info = 1;
   int use_color = 1;
-  int max_frames = 2000; // 0 = infinite
+  int max_frames = 2000;
   const char *shading = ".,-~:;=!*#$@";
 
   for (int i = 1; i < argc; i++) {
@@ -491,7 +606,7 @@ int main(int argc, char **argv) {
              "  --no-color                Disable logo coloring\n"
              "  --frames <n>              Stop after n frames\n"
              "  --infinite                Never auto-stop\n"
-             "  --shading-chars <str>     Custom ASCII shading ramp\n"
+             "  --shading-chars <str>     Custom shading ramp (supports UTF-8)\n"
              "  -h, --help                Show this help\n\n"
              "Config: ~/.config/fetch/logo.txt\n");
       return 0;
@@ -520,25 +635,28 @@ int main(int argc, char **argv) {
     }
   }
 
+  // Parse shading ramp into codepoints
+  parse_shading(shading);
+
   if (logo_name) {
-    // Try loading from fastfetch by name
     if (!load_logo_fastfetch(logo_name))
       load_default_logo();
     strncpy(distro, logo_name, sizeof(distro) - 1);
   } else if (!load_logo_file()) {
-    // Auto-detect distro
     if (detect_distro(distro, sizeof(distro)))
       if (!load_logo_fastfetch(distro))
         load_default_logo();
     if (logo_rows == 0)
       load_default_logo();
   } else {
-    // Logo loaded from file — use file_distro header if present
     if (file_distro[0])
       strncpy(distro, file_distro, sizeof(distro) - 1);
     else
       detect_distro(distro, sizeof(distro));
   }
+
+  // Process logo into codepoint cells
+  process_logo();
 
   if (distro[0])
     set_distro_colors(distro);
@@ -631,13 +749,12 @@ int main(int argc, char **argv) {
           L = 1.0f;
 
         zbuf[ys][xs] = ooz;
-        int slen = strlen(shading);
-        int ci = (int)(L * (slen - 1));
+        int ci = (int)(L * (shading_count - 1));
         if (ci < 0)
           ci = 0;
-        if (ci >= slen)
-          ci = slen - 1;
-        screen[ys][xs] = shading[ci];
+        if (ci >= shading_count)
+          ci = shading_count - 1;
+        memcpy(screen[ys][xs], shading_chars[ci], 5);
         colorbuf[ys][xs] = (PWEIGHT[i] >= 0.5f) ? 1 : 0;
       }
     }
@@ -645,11 +762,12 @@ int main(int argc, char **argv) {
     printf("\033[H");
     for (int i = 0; i < HEIGHT; i++) {
       if (!use_color) {
-        fwrite(screen[i], 1, ANIM_WIDTH, stdout);
+        for (int j = 0; j < ANIM_WIDTH; j++)
+          fputs(screen[i][j], stdout);
       } else {
         int prev_color = -1;
         for (int j = 0; j < ANIM_WIDTH; j++) {
-          if (screen[i][j] == ' ') {
+          if (screen[i][j][0] == ' ' && screen[i][j][1] == '\0') {
             if (prev_color != -1) {
               printf("\033[0m");
               prev_color = -1;
@@ -661,7 +779,7 @@ int main(int argc, char **argv) {
               printf("%s", c == 1 ? color_inner : color_outer);
               prev_color = c;
             }
-            fputc(screen[i][j], stdout);
+            fputs(screen[i][j], stdout);
           }
         }
         if (prev_color != -1)
