@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <termios.h>
 #include <unistd.h>
@@ -945,6 +946,200 @@ static void gather_gpu(void) {
   }
 }
 
+static void gather_memory(void) {
+  long total = 0, avail = 0;
+  FILE *fp = fopen("/proc/meminfo", "r");
+  if (!fp)
+    return;
+  char buf[128];
+  while (fgets(buf, sizeof(buf), fp)) {
+    if (strncmp(buf, "MemTotal:", 9) == 0)
+      sscanf(buf + 9, " %ld", &total);
+    else if (strncmp(buf, "MemAvailable:", 13) == 0)
+      sscanf(buf + 13, " %ld", &avail);
+  }
+  fclose(fp);
+  if (total <= 0)
+    return;
+
+  float used_gib = (total - avail) / 1048576.0f;
+  float total_gib = total / 1048576.0f;
+  int pct = (int)((total - avail) * 100 / total);
+
+  // Color: green <50%, yellow 50-79%, red 80%+
+  const char *color = pct >= 80 ? "31" : pct >= 50 ? "93" : "32";
+
+  char line[MAX_LINE_LEN];
+  snprintf(line, sizeof(line),
+           "\033[1;35mMemory\033[0m: %.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)",
+           used_gib, total_gib, color, pct);
+  add_line(line);
+}
+
+static void gather_swap(void) {
+  long total = 0, free_s = 0;
+  FILE *fp = fopen("/proc/meminfo", "r");
+  if (!fp)
+    return;
+  char buf[128];
+  while (fgets(buf, sizeof(buf), fp)) {
+    if (strncmp(buf, "SwapTotal:", 10) == 0)
+      sscanf(buf + 10, " %ld", &total);
+    else if (strncmp(buf, "SwapFree:", 9) == 0)
+      sscanf(buf + 9, " %ld", &free_s);
+  }
+  fclose(fp);
+  if (total <= 0)
+    return;
+
+  long used = total - free_s;
+  int pct = (int)(used * 100 / total);
+  const char *color = pct >= 80 ? "31" : pct >= 50 ? "93" : "32";
+
+  char line[MAX_LINE_LEN];
+  if (total >= 1048576)
+    snprintf(
+        line, sizeof(line),
+        "\033[1;35mSwap\033[0m: %.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)",
+        used / 1048576.0f, total / 1048576.0f, color, pct);
+  else
+    snprintf(
+        line, sizeof(line),
+        "\033[1;35mSwap\033[0m: %.2f MiB / %.2f MiB (\033[%sm%d%%\033[0m)",
+        used / 1024.0f, total / 1024.0f, color, pct);
+  add_line(line);
+}
+
+static void gather_disk(void) {
+  struct statvfs st;
+  if (statvfs("/", &st) != 0)
+    return;
+
+  float total_gib = (float)st.f_blocks * st.f_frsize / (1024 * 1024 * 1024);
+  float avail_gib = (float)st.f_bavail * st.f_frsize / (1024 * 1024 * 1024);
+  float used_gib = total_gib - avail_gib;
+  int pct = (int)(used_gib * 100 / total_gib);
+  const char *color = pct >= 80 ? "31" : pct >= 50 ? "93" : "32";
+
+  char line[MAX_LINE_LEN];
+  snprintf(
+      line, sizeof(line),
+      "\033[1;35mDisk (/)\033[0m: %.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)",
+      used_gib, total_gib, color, pct);
+  add_line(line);
+}
+
+static void gather_battery(void) {
+  // Find first battery in /sys/class/power_supply
+  FILE *fp = popen("ls /sys/class/power_supply/ 2>/dev/null", "r");
+  if (!fp)
+    return;
+  char bat_name[64] = "";
+  char buf[64];
+  while (fgets(buf, sizeof(buf), fp)) {
+    int len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+      buf[--len] = '\0';
+    // Check if it's a battery (has capacity file)
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/power_supply/%s/capacity", buf);
+    FILE *test = fopen(path, "r");
+    if (test) {
+      fclose(test);
+      strncpy(bat_name, buf, sizeof(bat_name) - 1);
+      break;
+    }
+  }
+  pclose(fp);
+  if (!bat_name[0])
+    return;
+
+  char path[256];
+  int capacity = -1;
+  char status[32] = "";
+
+  // Prefer energy_now/energy_full for accurate percentage
+  long energy_now = 0, energy_full = 0;
+  snprintf(path, sizeof(path), "/sys/class/power_supply/%s/energy_now",
+           bat_name);
+  fp = fopen(path, "r");
+  if (fp) {
+    if (fscanf(fp, "%ld", &energy_now) != 1)
+      energy_now = 0;
+    fclose(fp);
+  }
+  snprintf(path, sizeof(path), "/sys/class/power_supply/%s/energy_full",
+           bat_name);
+  fp = fopen(path, "r");
+  if (fp) {
+    if (fscanf(fp, "%ld", &energy_full) != 1)
+      energy_full = 0;
+    fclose(fp);
+  }
+  if (energy_full > 0)
+    capacity = (int)(energy_now * 100 / energy_full);
+
+  // Fall back to charge_now/charge_full
+  if (capacity < 0) {
+    long charge_now = 0, charge_full = 0;
+    snprintf(path, sizeof(path), "/sys/class/power_supply/%s/charge_now",
+             bat_name);
+    fp = fopen(path, "r");
+    if (fp) {
+      if (fscanf(fp, "%ld", &charge_now) != 1)
+        charge_now = 0;
+      fclose(fp);
+    }
+    snprintf(path, sizeof(path), "/sys/class/power_supply/%s/charge_full",
+             bat_name);
+    fp = fopen(path, "r");
+    if (fp) {
+      if (fscanf(fp, "%ld", &charge_full) != 1)
+        charge_full = 0;
+      fclose(fp);
+    }
+    if (charge_full > 0)
+      capacity = (int)(charge_now * 100 / charge_full);
+  }
+
+  // Last resort: capacity file
+  if (capacity < 0) {
+    snprintf(path, sizeof(path), "/sys/class/power_supply/%s/capacity",
+             bat_name);
+    fp = fopen(path, "r");
+    if (fp) {
+      if (fscanf(fp, "%d", &capacity) != 1)
+        capacity = -1;
+      fclose(fp);
+    }
+  }
+
+  snprintf(path, sizeof(path), "/sys/class/power_supply/%s/status", bat_name);
+  fp = fopen(path, "r");
+  if (fp) {
+    if (fgets(status, sizeof(status), fp)) {
+      int len = strlen(status);
+      while (len > 0 && (status[len - 1] == '\n' || status[len - 1] == '\r'))
+        status[--len] = '\0';
+    }
+    fclose(fp);
+  }
+
+  if (capacity >= 0) {
+    const char *color = capacity >= 50 ? "32" : capacity >= 20 ? "93" : "31";
+    char line[MAX_LINE_LEN];
+    if (status[0])
+      snprintf(line, sizeof(line),
+               "\033[1;35mBattery\033[0m: \033[%sm%d%%\033[0m [%s]", color,
+               capacity, status);
+    else
+      snprintf(line, sizeof(line),
+               "\033[1;35mBattery\033[0m: \033[%sm%d%%\033[0m", color,
+               capacity);
+    add_line(line);
+  }
+}
+
 static void capture_fastfetch(void) {
   FILE *fp = popen("fastfetch --logo none --pipe false 2>/dev/null", "r");
   if (!fp)
@@ -995,7 +1190,9 @@ static void capture_fastfetch(void) {
         strncmp(p, "Kernel", 6) == 0 || strncmp(p, "Uptime", 6) == 0 ||
         strncmp(p, "Packages", 8) == 0 || strncmp(p, "Shell", 5) == 0 ||
         strncmp(p, "Display", 7) == 0 || strncmp(p, "WM", 2) == 0 ||
-        strncmp(p, "CPU", 3) == 0 || strncmp(p, "GPU", 3) == 0)
+        strncmp(p, "CPU", 3) == 0 || strncmp(p, "GPU", 3) == 0 ||
+        strncmp(p, "Memory", 6) == 0 || strncmp(p, "Swap", 4) == 0 ||
+        strncmp(p, "Disk", 4) == 0 || strncmp(p, "Battery", 7) == 0)
       continue;
 
     memcpy(fetch_lines[fetch_line_count], buf, len + 1);
@@ -1330,6 +1527,10 @@ int main(int argc, char **argv) {
     gather_wm();
     gather_cpu();
     gather_gpu();
+    gather_memory();
+    gather_swap();
+    gather_disk();
+    gather_battery();
     capture_fastfetch();
   }
   build_points();
