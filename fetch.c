@@ -1800,13 +1800,14 @@ int main(int argc, char **argv) {
   if (config_height > 0) {
     render_height = config_height;
   } else if (show_info && fetch_line_count > 0) {
-    // Add some padding (2 top + 2 bottom)
-    render_height = fetch_line_count + 4;
+    // Use whichever is taller: info lines or default logo size
+    int info_height = fetch_line_count + 2;
+    render_height = info_height > 36 ? info_height : 36;
   }
   // Apply size scale
   render_height = (int)(render_height * size_scale);
-  if (render_height < 12)
-    render_height = 12;
+  if (render_height < 20)
+    render_height = 20;
   if (render_height > MAX_HEIGHT)
     render_height = MAX_HEIGHT;
 
@@ -1822,7 +1823,7 @@ int main(int argc, char **argv) {
   signal(SIGTERM, handle_signal);
   atexit(cleanup);
 
-  // Center info vertically
+  // Vertically center info in the render area
   int fetch_start = (render_height - fetch_line_count) / 2;
   if (fetch_start < 0)
     fetch_start = 0;
