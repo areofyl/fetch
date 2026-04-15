@@ -1876,7 +1876,7 @@ int main(int argc, char **argv) {
         continue;
       float ooz = 1.0f / zc;
       int xs = (int)((float)ANIM_WIDTH * 0.5f + K1 * 2.0f * x2 * ooz);
-      int ys = (int)((float)(2 + fetch_line_count / 2) - K1 * y2 * ooz);
+      int ys = (int)((float)(4 + fetch_line_count / 2) - K1 * y2 * ooz);
       if (xs < 0 || xs >= ANIM_WIDTH || ys < 0 || ys >= render_height)
         continue;
 
