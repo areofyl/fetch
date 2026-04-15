@@ -87,19 +87,46 @@ static void parse_shading(const char *str) {
 static char logo_data[MAX_LOGO_ROWS][512];
 // Parsed per-cell codepoints
 static char logo_cells[MAX_LOGO_ROWS][MAX_LOGO_COLS][5];
+static int logo_cell_color[MAX_LOGO_ROWS][MAX_LOGO_COLS]; // ANSI fg color per cell
 static int logo_cell_counts[MAX_LOGO_ROWS];
 static int logo_rows = 0;
 static int logo_cols = 0;
+static int logo_has_ansi = 0;
 
-// Process a logo row: split into codepoints, skipping ANSI escapes
+// Process a logo row: split into codepoints, extracting ANSI colors
 static void process_logo_row(int row) {
   const char *p = logo_data[row];
   int col = 0;
+  int cur_color = 0;
   while (*p && col < MAX_LOGO_COLS) {
-    // Skip ANSI escapes
-    int skip = skip_ansi(p);
-    if (skip > 0) {
-      p += skip;
+    // Parse ANSI escapes for color info
+    if (p[0] == '\033' && p[1] == '[') {
+      int i = 2;
+      // Extract foreground color from SGR params
+      int num = 0, has_num = 0;
+      while (p[i] && ((p[i] >= '0' && p[i] <= '9') || p[i] == ';')) {
+        if (p[i] >= '0' && p[i] <= '9') {
+          num = num * 10 + (p[i] - '0');
+          has_num = 1;
+        } else if (p[i] == ';') {
+          if (has_num && ((num >= 30 && num <= 37) || (num >= 90 && num <= 97)))
+            cur_color = num;
+          if (has_num && num == 0)
+            cur_color = 0;
+          num = 0;
+          has_num = 0;
+        }
+        i++;
+      }
+      if (has_num && ((num >= 30 && num <= 37) || (num >= 90 && num <= 97)))
+        cur_color = num;
+      if (has_num && num == 0)
+        cur_color = 0;
+      if (p[i])
+        i++;
+      if (cur_color > 0)
+        logo_has_ansi = 1;
+      p += i;
       continue;
     }
     int len = utf8_char_len((unsigned char)*p);
@@ -108,6 +135,7 @@ static void process_logo_row(int row) {
       actual++;
     memcpy(logo_cells[row][col], p, actual);
     logo_cells[row][col][actual] = '\0';
+    logo_cell_color[row][col] = cur_color;
     col++;
     p += actual;
   }
@@ -251,54 +279,50 @@ static int load_logo_file(void) {
   return logo_rows > 0;
 }
 
+// Check if an ANSI escape is a cursor movement (not a color/SGR escape)
+static int is_cursor_escape(const char *p) {
+  if (p[0] != '\033' || p[1] != '[')
+    return 0;
+  int i = 2;
+  while (p[i] && ((p[i] >= '0' && p[i] <= '9') || p[i] == ';'))
+    i++;
+  return (p[i] && p[i] != 'm');
+}
+
 static int load_logo_fastfetch(const char *name) {
   char cmd[256];
   snprintf(cmd, sizeof(cmd),
-           "fastfetch -l %s --logo-type builtin --pipe false 2>/dev/null", name);
+           "fastfetch -l %s --structure \"\" --pipe false 2>/dev/null", name);
   FILE *fp = popen(cmd, "r");
-  if (!fp)
-    return 0;
-  pclose(fp);
-
-  snprintf(cmd, sizeof(cmd), "fastfetch --print-logos 2>/dev/null");
-  fp = popen(cmd, "r");
   if (!fp)
     return 0;
 
   char buf[512];
-  int found = 0;
-  int name_len = strlen(name);
-
-  while (fgets(buf, sizeof(buf), fp)) {
+  while (logo_rows < MAX_LOGO_ROWS && fgets(buf, sizeof(buf), fp)) {
     int len = strlen(buf);
     while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
       buf[--len] = '\0';
 
-    if (!found) {
-      if (len > 0 && len <= name_len + 1 && buf[len - 1] == ':') {
-        buf[len - 1] = '\0';
-        if (strcasecmp(buf, name) == 0)
-          found = 1;
-      }
-      continue;
-    }
-
-    // Detect next logo header: short line ending in ':', starts with
-    // a letter, no spaces (e.g. "Fedora:" but not ":MMMMMMM:")
-    if (len > 1 && len < 40 && buf[len - 1] == ':' && logo_rows > 0 &&
-        ((buf[0] >= 'A' && buf[0] <= 'Z') || (buf[0] >= 'a' && buf[0] <= 'z'))) {
-      int is_header = 1;
-      for (int i = 0; i < len - 1; i++) {
-        if (buf[i] == ' ') {
-          is_header = 0;
-          break;
-        }
-      }
-      if (is_header)
+    // Truncate at first cursor movement escape (marks end of logo content)
+    for (int i = 0; i < len - 2; i++) {
+      if (is_cursor_escape(&buf[i])) {
+        // Strip preceding \033[m or \033[0m reset too
+        int cut = i;
+        if (cut >= 3 && buf[cut - 1] == 'm' && buf[cut - 2] == '[' &&
+            buf[cut - 3] == '\033')
+          cut -= 3;
+        else if (cut >= 4 && buf[cut - 1] == 'm' && buf[cut - 2] == '0' &&
+                 buf[cut - 3] == '[' && buf[cut - 4] == '\033')
+          cut -= 4;
+        buf[cut] = '\0';
+        len = cut;
         break;
+      }
     }
 
-    if (logo_rows >= MAX_LOGO_ROWS)
+    if (len == 0 && logo_rows == 0)
+      continue;
+    if (len == 0)
       break;
 
     memcpy(logo_data[logo_rows], buf, len + 1);
@@ -446,6 +470,7 @@ static void load_default_logo(void) {
 static float PX[MAX_POINTS], PY[MAX_POINTS], PZ[MAX_POINTS];
 static float NX[MAX_POINTS], NY[MAX_POINTS], NZ[MAX_POINTS];
 static float PWEIGHT[MAX_POINTS];
+static int PCOLOR[MAX_POINTS];
 static int POINT_COUNT = 0;
 
 // Fastfetch output storage
@@ -560,6 +585,7 @@ static void build_points(void) {
         PY[idx] = oy;
         PZ[idx] = t * 2.0f * zr;
         PWEIGHT[idx] = h;
+        PCOLOR[idx] = logo_cell_color[row][col];
 
         if (k == 0) {
           NX[idx] = gnx[row][col];
@@ -639,9 +665,11 @@ static void set_distro_colors(const char *distro) {
   } else if (strcasecmp(distro, "debian") == 0) {
     color_outer = "\033[1;31m";
     color_inner = "\033[1;37m";
-  } else if (strcasecmp(distro, "fedora-asahi-remix") == 0) {
-    color_outer = "\033[38;2;211;80;111m"; // asahi pink #d3506f
-    color_inner = "\033[38;2;0;166;124m";  // asahi teal #00a67c
+  } else if (strcasecmp(distro, "asahi") == 0 ||
+             strcasecmp(distro, "asahi2") == 0 ||
+             strcasecmp(distro, "fedora-asahi-remix") == 0) {
+    color_outer = "\033[1;31m"; // bold red
+    color_inner = "\033[1;37m"; // bold white
   } else if (strcasecmp(distro, "fedora") == 0 ||
              strncasecmp(distro, "fedora-", 7) == 0) {
     color_outer = "\033[1;34m";
@@ -732,13 +760,27 @@ int main(int argc, char **argv) {
     if (!load_logo_fastfetch(logo_name))
       load_default_logo();
     strncpy(distro, logo_name, sizeof(distro) - 1);
-  } else if (!load_logo_file()) {
+  } else {
+    // Try logo.txt first for distro hint, then detect
+    load_logo_file();
+    if (file_distro[0])
+      strncpy(distro, file_distro, sizeof(distro) - 1);
+    else
+      detect_distro(distro, sizeof(distro));
+
+    // Try fastfetch for colored logo (prefer over plain logo.txt)
     int got_logo = 0;
-    if (detect_distro(distro, sizeof(distro))) {
+    if (distro[0]) {
+      // Reset logo state to try fastfetch
+      int saved_rows = logo_rows;
+      char saved_data[MAX_LOGO_ROWS][512];
+      for (int i = 0; i < saved_rows; i++)
+        memcpy(saved_data[i], logo_data[i], 512);
+      logo_rows = 0;
+      logo_cols = 0;
+
       got_logo = load_logo_fastfetch(distro);
-      // Try ID_LIKE as fallback (e.g. Proxmox ID=debian but ID_LIKE=debian)
       if (!got_logo && distro_id_like[0]) {
-        // ID_LIKE can have multiple space-separated values
         char like_copy[64];
         strncpy(like_copy, distro_id_like, sizeof(like_copy) - 1);
         like_copy[sizeof(like_copy) - 1] = '\0';
@@ -750,14 +792,15 @@ int main(int argc, char **argv) {
           tok = strtok(NULL, " ");
         }
       }
+      if (!got_logo) {
+        // Restore logo.txt data
+        logo_rows = saved_rows;
+        for (int i = 0; i < saved_rows; i++)
+          memcpy(logo_data[i], saved_data[i], 512);
+      }
     }
-    if (!got_logo)
+    if (!got_logo && logo_rows == 0)
       load_default_logo();
-  } else {
-    if (file_distro[0])
-      strncpy(distro, file_distro, sizeof(distro) - 1);
-    else
-      detect_distro(distro, sizeof(distro));
   }
 
   // Process logo into codepoint cells
@@ -860,7 +903,8 @@ int main(int argc, char **argv) {
         if (ci >= shading_count)
           ci = shading_count - 1;
         memcpy(screen[ys][xs], shading_chars[ci], 5);
-        colorbuf[ys][xs] = (PWEIGHT[i] >= 0.5f) ? 1 : 0;
+        colorbuf[ys][xs] = logo_has_ansi ? PCOLOR[i]
+                            : ((PWEIGHT[i] >= color_threshold) ? 1 : 0);
       }
     }
 
@@ -881,7 +925,10 @@ int main(int argc, char **argv) {
           } else {
             int c = colorbuf[i][j];
             if (c != prev_color) {
-              printf("%s", c == 1 ? color_inner : color_outer);
+              if (logo_has_ansi && c > 0)
+                printf("\033[1;%dm", c);
+              else
+                printf("%s", c == 1 ? color_inner : color_outer);
               prev_color = c;
             }
             fputs(screen[i][j], stdout);
