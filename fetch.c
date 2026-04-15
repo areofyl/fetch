@@ -499,8 +499,16 @@ static int field_enabled[F_COUNT];
 static int field_order[F_COUNT];
 static int field_count = 0;
 static char label_color[16] = "35"; // default magenta
-static int config_height = 0; // 0 = auto (match info lines)
+static int config_height = 0;     // 0 = auto (match info lines)
 static float size_scale = 1.0f;
+static float config_speed = 0.0f;    // 0 = use flag/default
+static int config_spin_x = -1;       // -1 = use flag/default
+static int config_spin_y = -1;
+static char config_shading[128] = "";
+static char config_separator[8] = "-";
+
+// Light direction presets
+static float light_x = 0.4082f, light_y = 0.8165f, light_z = -0.4082f;
 
 static const struct {
   const char *name;
@@ -580,6 +588,51 @@ static void load_config(void) {
         config_height = MAX_HEIGHT;
       continue;
     }
+    if (strncmp(line, "size=", 5) == 0) {
+      size_scale = atof(line + 5);
+      if (size_scale < 0.5f) size_scale = 0.5f;
+      if (size_scale > 5.0f) size_scale = 5.0f;
+      continue;
+    }
+    if (strncmp(line, "speed=", 6) == 0) {
+      config_speed = atof(line + 6);
+      continue;
+    }
+    if (strncmp(line, "spin=", 5) == 0) {
+      char *val = line + 5;
+      config_spin_x = (strchr(val, 'x') || strchr(val, 'X')) ? 1 : 0;
+      config_spin_y = (strchr(val, 'y') || strchr(val, 'Y')) ? 1 : 0;
+      continue;
+    }
+    if (strncmp(line, "shading=", 8) == 0) {
+      strncpy(config_shading, line + 8, sizeof(config_shading) - 1);
+      continue;
+    }
+    if (strncmp(line, "separator=", 10) == 0) {
+      strncpy(config_separator, line + 10, sizeof(config_separator) - 1);
+      continue;
+    }
+    if (strncmp(line, "light=", 6) == 0) {
+      char *val = line + 6;
+      if (strcmp(val, "top-left") == 0) {
+        light_x = 0.41f; light_y = 0.82f; light_z = -0.41f;
+      } else if (strcmp(val, "top-right") == 0) {
+        light_x = -0.41f; light_y = 0.82f; light_z = -0.41f;
+      } else if (strcmp(val, "top") == 0) {
+        light_x = 0.0f; light_y = 0.89f; light_z = -0.45f;
+      } else if (strcmp(val, "left") == 0) {
+        light_x = 0.82f; light_y = 0.41f; light_z = -0.41f;
+      } else if (strcmp(val, "right") == 0) {
+        light_x = -0.82f; light_y = 0.41f; light_z = -0.41f;
+      } else if (strcmp(val, "front") == 0) {
+        light_x = 0.0f; light_y = 0.0f; light_z = -1.0f;
+      } else if (strcmp(val, "bottom-left") == 0) {
+        light_x = 0.41f; light_y = -0.82f; light_z = -0.41f;
+      } else if (strcmp(val, "bottom-right") == 0) {
+        light_x = -0.41f; light_y = -0.82f; light_z = -0.41f;
+      }
+      continue;
+    }
 
     // Match field name
     for (int i = 0; field_map[i].name; i++) {
@@ -637,12 +690,16 @@ static void gather_title(void) {
   add_line(line);
 
   // separator
-  int len = strlen(user) + 1 + strlen(host);
+  int title_len = strlen(user) + 1 + strlen(host);
   char sep[MAX_LINE_LEN];
-  if (len >= MAX_LINE_LEN)
-    len = MAX_LINE_LEN - 1;
-  memset(sep, '-', len);
-  sep[len] = '\0';
+  int sep_char_len = strlen(config_separator);
+  if (sep_char_len == 0) sep_char_len = 1;
+  int pos = 0;
+  for (int i = 0; i < title_len && pos + sep_char_len < MAX_LINE_LEN; i++) {
+    memcpy(sep + pos, config_separator, sep_char_len);
+    pos += sep_char_len;
+  }
+  sep[pos] = '\0';
   add_line(sep);
 }
 
@@ -1704,6 +1761,16 @@ int main(int argc, char **argv) {
   config_defaults();
   load_config();
 
+  // Config overrides for shading, speed, spin (CLI flags take priority)
+  if (config_shading[0])
+    parse_shading(config_shading);
+  if (config_speed > 0 && speed == 1.0f)
+    speed = config_speed;
+  if (config_spin_x >= 0 && rotate_x == 1 && rotate_y == 1) {
+    rotate_x = config_spin_x;
+    rotate_y = config_spin_y;
+  }
+
   if (logo_name) {
     if (!load_logo_fastfetch(logo_name))
       load_default_logo();
@@ -1866,7 +1933,7 @@ int main(int argc, char **argv) {
     float cA = cosf(A), sA = sinf(A);
     float cB = cosf(B), sB = sinf(B);
 
-    const float lx = 0.4082f, ly = 0.8165f, lz = -0.4082f;
+    const float lx = light_x, ly = light_y, lz = light_z;
     const float vx = 0.0f, vy = 0.0f, vz = -1.0f;
     float hx = lx + vx, hy = ly + vy, hz = lz + vz;
     float hl = sqrtf(hx * hx + hy * hy + hz * hz);
