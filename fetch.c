@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/utsname.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -519,6 +520,71 @@ static void gather_title(void) {
   add_line(sep);
 }
 
+static void gather_os(void) {
+  char pretty[128] = "";
+  FILE *fp = fopen("/etc/os-release", "r");
+  if (fp) {
+    char buf[256];
+    while (fgets(buf, sizeof(buf), fp)) {
+      if (strncmp(buf, "PRETTY_NAME=", 12) == 0) {
+        char *val = buf + 12;
+        int len = strlen(val);
+        while (len > 0 && (val[len - 1] == '\n' || val[len - 1] == '\r'))
+          val[--len] = '\0';
+        if (*val == '\'' || *val == '"')
+          val++;
+        len = strlen(val);
+        if (len > 0 && (val[len - 1] == '\'' || val[len - 1] == '"'))
+          val[--len] = '\0';
+        strncpy(pretty, val, sizeof(pretty) - 1);
+        break;
+      }
+    }
+    fclose(fp);
+  }
+  if (!pretty[0])
+    strcpy(pretty, "Linux");
+
+  struct utsname u;
+  uname(&u);
+
+  char line[MAX_LINE_LEN];
+  snprintf(line, sizeof(line), "\033[1;35mOS\033[0m: %s %s", pretty, u.machine);
+  add_line(line);
+}
+
+static void gather_host(void) {
+  char model[128] = "";
+  // Try device-tree first (ARM/Apple Silicon), then DMI (x86)
+  FILE *fp = fopen("/proc/device-tree/model", "r");
+  if (!fp)
+    fp = fopen("/sys/class/dmi/id/product_name", "r");
+  if (fp) {
+    if (fgets(model, sizeof(model), fp)) {
+      int len = strlen(model);
+      while (len > 0 && (model[len - 1] == '\n' || model[len - 1] == '\r' ||
+                         model[len - 1] == '\0'))
+        len--;
+      model[len] = '\0';
+    }
+    fclose(fp);
+  }
+  if (model[0]) {
+    char line[MAX_LINE_LEN];
+    snprintf(line, sizeof(line), "\033[1;35mHost\033[0m: %s", model);
+    add_line(line);
+  }
+}
+
+static void gather_kernel(void) {
+  struct utsname u;
+  uname(&u);
+  char line[MAX_LINE_LEN];
+  snprintf(line, sizeof(line), "\033[1;35mKernel\033[0m: %s %s", u.sysname,
+           u.release);
+  add_line(line);
+}
+
 static void capture_fastfetch(void) {
   FILE *fp = popen("fastfetch --logo none --pipe false 2>/dev/null", "r");
   if (!fp)
@@ -553,6 +619,22 @@ static void capture_fastfetch(void) {
       }
       skip_header = 0;
     }
+    // Skip lines we generate natively (check for label after ANSI codes)
+    const char *p = buf;
+    while (*p == '\033') {
+      p++;
+      if (*p == '[') {
+        p++;
+        while (*p && ((*p >= '0' && *p <= '9') || *p == ';'))
+          p++;
+        if (*p)
+          p++;
+      }
+    }
+    if (strncmp(p, "OS", 2) == 0 || strncmp(p, "Host", 4) == 0 ||
+        strncmp(p, "Kernel", 6) == 0)
+      continue;
+
     memcpy(fetch_lines[fetch_line_count], buf, len + 1);
     fetch_line_count++;
   }
@@ -875,6 +957,9 @@ int main(int argc, char **argv) {
 
   if (show_info) {
     gather_title();
+    gather_os();
+    gather_host();
+    gather_kernel();
     capture_fastfetch();
   }
   build_points();
