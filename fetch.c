@@ -497,6 +497,8 @@ enum {
 
 static int field_enabled[F_COUNT];
 static int field_order[F_COUNT];
+static int field_line[F_COUNT]; // line index for each field (-1 if not shown)
+static int current_field = -1;  // which field is currently being gathered
 static int field_count = 0;
 static char label_color[16] = "35"; // default magenta
 static int config_height = 0;     // 0 = auto (match info lines)
@@ -657,7 +659,8 @@ static void add_line(const char *line) {
   fetch_line_count++;
 }
 
-// Format a labeled info line using the configured label color
+// Format a labeled info line using the configured label color.
+// If the current field already has a line index, update it in place.
 static void add_info(const char *label, const char *fmt, ...) {
   char val[MAX_LINE_LEN];
   va_list ap;
@@ -668,6 +671,17 @@ static void add_info(const char *label, const char *fmt, ...) {
   char line[MAX_LINE_LEN];
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
            val);
+
+  // If this field already has a line, replace in place (refresh mode)
+  if (current_field >= 0 && field_line[current_field] >= 0) {
+    int idx = field_line[current_field];
+    strncpy(fetch_lines[idx], line, MAX_LINE_LEN - 1);
+    fetch_lines[idx][MAX_LINE_LEN - 1] = '\0';
+    return;
+  }
+  // First time: record line index and append
+  if (current_field >= 0)
+    field_line[current_field] = fetch_line_count;
   add_line(line);
 }
 
@@ -1849,6 +1863,9 @@ int main(int argc, char **argv) {
       [F_COLORS] = NULL,
   };
 
+  for (int i = 0; i < F_COUNT; i++)
+    field_line[i] = -1;
+
   if (show_info) {
     gather_title();
     for (int i = 0; i < field_count; i++) {
@@ -1860,9 +1877,11 @@ int main(int argc, char **argv) {
         add_line("\033[100m   \033[101m   \033[102m   \033[103m   "
                  "\033[104m   \033[105m   \033[106m   \033[107m   \033[0m");
       } else if (fns[id]) {
+        current_field = id;
         fns[id]();
       }
     }
+    current_field = -1;
   }
   // Set render height: config/flag override > auto-fit to info lines > default
   if (config_height > 0) {
@@ -1909,22 +1928,24 @@ int main(int argc, char **argv) {
     struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
     if (poll(&pfd, 1, 0) > 0)
       break;
-    // Refresh dynamic info every ~1 second (20 frames)
+    // Refresh fast dynamic fields every ~1 second (20 frames).
+    // Only uptime/memory/swap — they're pure /proc reads, no popen,
+    // so they don't hitch the animation. Battery/disk/ip use popen and
+    // stay static (user can restart to refresh those).
     if (show_info && frame > 0 && frame % 20 == 0) {
-      fetch_line_count = 0;
-      gather_title();
-      for (int i = 0; i < field_count; i++) {
-        int id = field_order[i];
-        if (id == F_COLORS) {
-          add_line("");
-          add_line("\033[40m   \033[41m   \033[42m   \033[43m   "
-                   "\033[44m   \033[45m   \033[46m   \033[47m   \033[0m");
-          add_line("\033[100m   \033[101m   \033[102m   \033[103m   "
-                   "\033[104m   \033[105m   \033[106m   \033[107m   \033[0m");
-        } else if (fns[id]) {
-          fns[id]();
-        }
+      if (field_line[F_UPTIME] >= 0) {
+        current_field = F_UPTIME;
+        gather_uptime();
       }
+      if (field_line[F_MEMORY] >= 0) {
+        current_field = F_MEMORY;
+        gather_memory();
+      }
+      if (field_line[F_SWAP] >= 0) {
+        current_field = F_SWAP;
+        gather_swap();
+      }
+      current_field = -1;
     }
 
     clear_buf();
