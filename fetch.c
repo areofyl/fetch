@@ -503,6 +503,17 @@ static char label_color[16] = "35"; // default magenta
 static char config_logo_outer[32] = "";
 static char config_logo_inner[32] = "";
 
+// Light-theme mode drops the forced-bold brightening in label and logo cell
+// rendering, and optionally substitutes any of the 8 base foreground colors
+// (30-37) with a darker color so bright variants stay visible on light
+// terminal backgrounds. By default only bright-white (37) is substituted.
+static int theme_is_light = 0;
+static char light_subs[8][32] = {
+    [7] = "\033[38;5;18m", // white -> deep navy
+};
+static const char *light_color_names[8] = {
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"};
+
 // Parse a color spec ("name", "bold-<name>", or raw SGR params like "38;5;18")
 // into a full ANSI escape sequence stored in `out`.
 static void parse_color_spec(const char *val, char *out, size_t outsz) {
@@ -592,6 +603,23 @@ static void load_config(void) {
       continue;
 
     // Check for key=value settings
+    if (strncmp(line, "theme=", 6) == 0) {
+      theme_is_light = (strcmp(line + 6, "light") == 0);
+      continue;
+    }
+    if (strncmp(line, "light_", 6) == 0) {
+      char *eq = strchr(line + 6, '=');
+      if (eq) {
+        *eq = '\0';
+        for (int i = 0; i < 8; i++) {
+          if (strcmp(line + 6, light_color_names[i]) == 0) {
+            parse_color_spec(eq + 1, light_subs[i], sizeof(light_subs[i]));
+            break;
+          }
+        }
+        continue;
+      }
+    }
     if (strncmp(line, "logo_outer=", 11) == 0) {
       parse_color_spec(line + 11, config_logo_outer, sizeof(config_logo_outer));
       continue;
@@ -697,8 +725,8 @@ static void add_info(const char *label, const char *fmt, ...) {
   va_end(ap);
 
   char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
-           val);
+  snprintf(line, sizeof(line), "\033[%s%sm%s\033[0m: %s",
+           theme_is_light ? "" : "1;", label_color, label, val);
   add_line(line);
 }
 
@@ -716,8 +744,9 @@ static void gather_title(void) {
   gethostname(host, sizeof(host));
 
   char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m@\033[1;%sm%s\033[0m",
-           label_color, user, label_color, host);
+  const char *bold = theme_is_light ? "" : "1;";
+  snprintf(line, sizeof(line), "\033[%s%sm%s\033[0m@\033[%s%sm%s\033[0m",
+           bold, label_color, user, bold, label_color, host);
   add_line(line);
 
   // separator
@@ -2044,9 +2073,17 @@ int main(int argc, char **argv) {
           } else {
             int c = colorbuf[i][j];
             if (c != prev_color) {
-              if (logo_has_ansi && c > 0)
-                printf("\033[1;%dm", c);
-              else
+              if (logo_has_ansi && c > 0) {
+                int idx = -1;
+                if (c >= 30 && c <= 37) idx = c - 30;
+                else if (c >= 90 && c <= 97) idx = c - 90;
+                if (theme_is_light && idx >= 0 && light_subs[idx][0])
+                  printf("%s", light_subs[idx]);
+                else if (theme_is_light)
+                  printf("\033[%dm", c);
+                else
+                  printf("\033[1;%dm", c);
+              } else
                 printf("%s", c == 1 ? color_inner : color_outer);
               prev_color = c;
             }

@@ -109,6 +109,17 @@ colors
 # label_color=magenta   (red, green, yellow, blue, magenta, cyan, white)
 # separator=─           (character for the title separator)
 # shading=.,-~:;=!*#$@  (characters for 3D shading, supports UTF-8)
+# theme=light           (light or dark; light disables forced-bold and applies
+#                        per-color substitutions so the logo stays visible
+#                        on light terminal bgs)
+# light_white=38;5;18   (substitute for color 37 when theme=light; by default
+#                        only white is remapped. Each of light_black, light_red,
+#                        light_green, light_yellow, light_blue, light_magenta,
+#                        light_cyan, light_white can be set to override a color;
+#                        accepts names, bold-<name>, or raw SGR)
+# logo_outer=magenta    (override outer 3D logo color; useful when the logo
+#                        has no embedded colors, e.g. the built-in gentoo ASCII)
+# logo_inner=bold-white (override inner 3D logo color; same format as above)
 
 # 3d
 # light=top-left        (top-left, top-right, top, left, right, front, bottom-left, bottom-right)
