@@ -499,6 +499,29 @@ static int field_enabled[F_COUNT];
 static int field_order[F_COUNT];
 static int field_count = 0;
 static char label_color[16] = "35"; // default magenta
+// Optional user overrides for the 3D logo colors (empty = use per-distro defaults).
+static char config_logo_outer[32] = "";
+static char config_logo_inner[32] = "";
+
+// Parse a color spec ("name", "bold-<name>", or raw SGR params like "38;5;18")
+// into a full ANSI escape sequence stored in `out`.
+static void parse_color_spec(const char *val, char *out, size_t outsz) {
+  int bold = 0;
+  if (strncmp(val, "bold-", 5) == 0) { bold = 1; val += 5; }
+  const char *code = NULL;
+  if      (strcmp(val, "black")   == 0) code = "30";
+  else if (strcmp(val, "red")     == 0) code = "31";
+  else if (strcmp(val, "green")   == 0) code = "32";
+  else if (strcmp(val, "yellow")  == 0) code = "33";
+  else if (strcmp(val, "blue")    == 0) code = "34";
+  else if (strcmp(val, "magenta") == 0) code = "35";
+  else if (strcmp(val, "cyan")    == 0) code = "36";
+  else if (strcmp(val, "white")   == 0) code = "37";
+  if (code)
+    snprintf(out, outsz, "\033[%s%sm", bold ? "1;" : "", code);
+  else
+    snprintf(out, outsz, "\033[%sm", val);
+}
 static int config_height = 0;     // 0 = auto (match info lines)
 static float size_scale = 1.0f;
 static float config_speed = 0.0f;    // 0 = use flag/default
@@ -569,6 +592,14 @@ static void load_config(void) {
       continue;
 
     // Check for key=value settings
+    if (strncmp(line, "logo_outer=", 11) == 0) {
+      parse_color_spec(line + 11, config_logo_outer, sizeof(config_logo_outer));
+      continue;
+    }
+    if (strncmp(line, "logo_inner=", 11) == 0) {
+      parse_color_spec(line + 11, config_logo_inner, sizeof(config_logo_inner));
+      continue;
+    }
     if (strncmp(line, "label_color=", 12) == 0) {
       char *val = line + 12;
       // Accept color names or numbers
@@ -1823,6 +1854,8 @@ int main(int argc, char **argv) {
 
   if (distro[0])
     set_distro_colors(distro);
+  if (config_logo_outer[0]) color_outer = config_logo_outer;
+  if (config_logo_inner[0]) color_inner = config_logo_inner;
 
   typedef void (*gather_fn)(void);
   gather_fn fns[F_COUNT] = {
