@@ -1962,7 +1962,10 @@ int main(int argc, char **argv) {
         continue;
       float ooz = 1.0f / zc;
       int xs = (int)((float)ANIM_WIDTH * 0.5f + K1 * 2.0f * x2 * ooz);
-      int ys = (int)((float)(4 + fetch_line_count / 2) - K1 * y2 * ooz);
+      float y_center = fetch_line_count > 0
+                           ? fetch_start + fetch_line_count / 2.0f
+                           : render_height * 0.5f;
+      int ys = (int)(y_center - K1 * y2 * ooz);
       if (xs < 0 || xs >= ANIM_WIDTH || ys < 0 || ys >= render_height)
         continue;
 
