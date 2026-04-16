@@ -29,6 +29,40 @@ sudo make install
 
 `PREFIX=~/.local make install` if you don't want it system-wide.
 
+### Nix Flake
+Add this repo to your ```flake.nix```. The package is built using the unstable channel. You can overwrite this by setting ```inputs.nixpkgs.follows = "nixpkgs"``` (if your default is 25.11).
+
+```nix
+inputs = {
+  ...
+areofyl-fetch.url = "github:areofyl/fetch";
+  ...
+}
+```
+#### Home-manager
+You also need to import the nix package in your ```home.nix```. Check ```nix/home-module.nix``` for the options. Most are the same but hyphens can not be used so camel-case has been used for those options instead.
+
+```nix
+{ pkgs, inputs, ... }: 
+
+{
+  import = [ inputs.areofyl-fetch.homeManagerModules.default ];
+  
+  programs.fetch = {
+    enable = true;
+    labelColor = "red";
+    info = [];
+    speed = 1.0;
+    spin = "xy";
+  };
+  
+}
+```
+
+#### Bugs
+* Because fastfetch is wrapped the ```terminal``` field will print: ".fetch-wrapped" on a kitty terminal.
+* GPU will not print full name, just generic "AMD GPU".
+
 ## Logos
 
 By default it auto-detects your distro and grabs the logo from fastfetch
