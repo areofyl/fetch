@@ -59,6 +59,9 @@ You also need to import the nix package in your ```home.nix```. Check ```nix/hom
 }
 ```
 
+#### Issues
+* GPU will not print full name, just generic "AMD GPU".
+
 ## Logos
 
 By default it auto-detects your distro and grabs the logo from fastfetch
@@ -163,9 +166,93 @@ colors
 | `--frames <n>` | Stop after n frames |
 | `--infinite` | Run forever |
 | `--shading-chars <str>` | Custom shading ramp, supports UTF-8 |
+| `--ff-config [path]` | Use a fastfetch config for the info layout |
+| `--no-ff-config` | Force-disable fastfetch config mode |
 | `-h`, `--help` | Show help |
 
 CLI flags override config file settings.
+
+## Using a fastfetch config
+
+If you already maintain a fastfetch config (or want to drop one of the many
+community presets in), you can reuse it for the info panel without giving up
+fetch's spinning 3D logo:
+
+```
+fetch --ff-config                          # auto-discover ~/.config/fastfetch/config.jsonc
+fetch --ff-config ~/presets/neofetch.jsonc # explicit path
+fetch --ff-config=/path/to/preset.jsonc    # inline form
+```
+
+Or wire it in fetch's own config (`~/.config/fetch/config`):
+
+```
+fastfetch_config=auto     # auto-discover
+fastfetch_config=/abs/path/to/preset.jsonc
+fastfetch_config=off      # default
+```
+
+CLI wins over config. Use `--no-ff-config` to force it off for a single run.
+
+### What gets borrowed (and what doesn't)
+
+From the `modules` array each entry contributes:
+
+- `type` → which gatherer runs (and in what order)
+- `key` → the label. Supports the `{icon}` token, which expands to the
+  distro's Nerd Font glyph
+- `keyColor` → label color, accepts both color names (`"yellow"`) and raw
+  ANSI params (`"38;5;200"`)
+- `format` → token string like `"{2} [{6}]"` for GPU or `"{1}"` for
+  theme/icons/font. Per-module token semantics mirror fastfetch's where
+  implemented (see below).
+- `custom` modules: `format` is rendered verbatim as a line with
+  `{$N}` (substituted from the top-level `display.constants[N-1]`) and
+  `{#N}` (ANSI SGR escape, e.g. `{#1}` → bold, `{#31}` → red, `{#}` → reset).
+  `outputColor` wraps the whole line in an ANSI color.
+
+From the top-level `display` block:
+
+- `separator` → the key/value separator (default `": "`)
+- `constants` → strings referenced by `{$N}` in custom format strings
+
+**Intentionally ignored (on purpose):**
+
+- `logo`, `padding`, `$schema`, everything else under `display`, and all
+  per-module tuning knobs beyond type/key/keyColor/format/outputColor.
+  Fetch's 3D spinning logo always wins. Your waifu wallpaper stays in
+  `~/.config/fastfetch/`, it does not hijack the animation.
+- `format` tokens beyond what each gatherer exposes (see supported list).
+- Modules without a native equivalent (`publicip`, `gamepad`,
+  `terminalsize`, `camera`, etc.) are silently skipped.
+
+### Supported modules
+
+Layout: `title`, `separator`, `break`, `colors`, `custom`.
+
+System: `os`, `host`, `kernel`, `uptime`, `packages`, `shell`, `locale`,
+`terminal`, `terminalfont` (aliased to `font`).
+
+Desktop: `de`, `lm`, `wm`, `theme`/`wmtheme`, `icons`, `font`.
+
+Hardware: `cpu`, `gpu` (enumerated one line per card, vendor + name via
+`lspci`), `display` (enumerated one line per connected connector),
+`memory`, `swap`, `disk`, `battery`, `brightness`, `poweradapter`.
+
+Network / audio / media: `localip`/`ip`, `wifi` (via `nmcli` or `iw`),
+`sound` (via `wpctl` / `pactl`), `bluetooth` (via `bluetoothctl`), `player`
+and `media` (via `playerctl` with a `busctl` fallback — MPRIS).
+
+### Format tokens
+
+Where token-based `format` strings are honoured, these are the currently
+exposed tokens (match fastfetch's most common conventions):
+
+- `gpu`: `{1}` vendor, `{2}` name, `{3}` driver, `{6}` type.
+- `theme`, `icons`, `font`: `{1}` name, `{2}` backend (`GTK3`).
+
+Everywhere else, `format` is ignored in v1. Fetch emits each field as its
+default rendered string, and `key`/`keyColor` still apply.
 
 ## How it works
 

@@ -251,6 +251,7 @@ static float char_weight_utf8(const char *ch) {
 }
 
 static char file_distro[64] = "";
+static char detected_distro[64] = ""; // filled in main, used by {icon} expansion
 
 static int load_logo_file(void) {
   char path[512];
@@ -493,15 +494,20 @@ static int fetch_line_count = 0;
 enum {
   F_OS, F_HOST, F_KERNEL, F_UPTIME, F_PACKAGES, F_SHELL, F_DISPLAY, F_WM,
   F_THEME, F_ICONS, F_FONT, F_TERMINAL, F_CPU, F_GPU, F_MEMORY, F_SWAP,
-  F_DISK, F_IP, F_BATTERY, F_LOCALE, F_COLORS, F_COUNT
+  F_DISK, F_IP, F_BATTERY, F_LOCALE, F_COLORS,
+  F_TITLE, F_SEPARATOR, F_BREAK,
+  F_DE, F_LM, F_BRIGHTNESS, F_POWERADAPTER,
+  F_SOUND, F_BLUETOOTH, F_WIFI, F_PLAYER, F_MEDIA,
+  F_COUNT
 };
 
+#define MAX_FIELD_SEQ 64
+
 static int field_enabled[F_COUNT];
-static int field_order[F_COUNT];
+static int field_order[MAX_FIELD_SEQ];
 static int field_line[F_COUNT]; // line index for each field (-1 if not shown)
 static int current_field = -1;  // which field is currently being gathered
 static int field_count = 0;
-static int is_refresh_pass = 0; // 1 during the animation refresh tick
 static char label_color[16] = "35"; // default magenta
 static int config_height = 0;     // 0 = auto (match info lines)
 static float size_scale = 1.0f;
@@ -510,6 +516,24 @@ static int config_spin_x = -1;       // -1 = use flag/default
 static int config_spin_y = -1;
 static char config_shading[128] = "";
 static char config_separator[8] = "-";
+// Per-sequence-entry overrides (applies to both normal and custom modules).
+static char seq_label_override[MAX_FIELD_SEQ][64];
+static char seq_color_override[MAX_FIELD_SEQ][16];
+static char seq_custom_format[MAX_FIELD_SEQ][512];
+static char seq_custom_color[MAX_FIELD_SEQ][32];
+static char seq_format[MAX_FIELD_SEQ][256]; // per-module `format` string
+static int current_seq_idx = -1;      // sequence slot for the in-flight gather
+static int field_seq_idx[F_COUNT];    // maps a field id to its first seq slot
+static int is_refresh_pass = 0;        // 1 during the animation-loop refresh gather
+
+static int ff_mode_active = 0;       // 1 when fastfetch config drives ordering
+static char config_ff_setting[512] = ""; // fetch config: "", "auto", "off", or path
+
+#define MAX_FF_CONSTANTS 8
+#define MAX_FF_CONSTANT_LEN 256
+static char ff_separator_str[32] = ": ";
+static char ff_constants[MAX_FF_CONSTANTS][MAX_FF_CONSTANT_LEN];
+static int ff_constants_count = 0;
 
 // Light direction presets
 static float light_x = 0.4082f, light_y = 0.8165f, light_z = -0.4082f;
@@ -554,10 +578,10 @@ static void load_config(void) {
   if (!fp)
     return;
 
-  // Config file exists — reset defaults, use file order
-  for (int i = 0; i < F_COUNT; i++)
-    field_enabled[i] = 0;
-  field_count = 0;
+  // Only reset defaults when the file actually lists fields.
+  // A config with only directives (e.g., fastfetch_config=) leaves defaults
+  // in place so the user gets fetch's normal field set.
+  int cleared = 0;
 
   char buf[256];
   while (fgets(buf, sizeof(buf), fp)) {
@@ -616,6 +640,11 @@ static void load_config(void) {
       strncpy(config_separator, line + 10, sizeof(config_separator) - 1);
       continue;
     }
+    if (strncmp(line, "fastfetch_config=", 17) == 0) {
+      strncpy(config_ff_setting, line + 17, sizeof(config_ff_setting) - 1);
+      config_ff_setting[sizeof(config_ff_setting) - 1] = '\0';
+      continue;
+    }
     if (strncmp(line, "light=", 6) == 0) {
       char *val = line + 6;
       if (strcmp(val, "top-left") == 0) {
@@ -641,8 +670,13 @@ static void load_config(void) {
     // Match field name
     for (int i = 0; field_map[i].name; i++) {
       if (strcasecmp(line, field_map[i].name) == 0) {
+        if (!cleared) {
+          for (int k = 0; k < F_COUNT; k++) field_enabled[k] = 0;
+          field_count = 0;
+          cleared = 1;
+        }
         int id = field_map[i].id;
-        if (!field_enabled[id] && field_count < F_COUNT) {
+        if (!field_enabled[id] && field_count < MAX_FIELD_SEQ) {
           field_enabled[id] = 1;
           field_order[field_count++] = id;
         }
@@ -661,6 +695,46 @@ static void add_line(const char *line) {
   fetch_line_count++;
 }
 
+static const char *effective_label_color(void) {
+  if (current_seq_idx >= 0 && current_seq_idx < MAX_FIELD_SEQ &&
+      seq_color_override[current_seq_idx][0])
+    return seq_color_override[current_seq_idx];
+  return label_color;
+}
+
+static const char *ff_distro_glyph(const char *distro) {
+  if (!distro || !*distro) return "\uf17c";
+  struct { const char *id; const char *g; } map[] = {
+      {"gentoo", "\uf08d"},    {"arch", "\uf303"},
+      {"archlinux", "\uf303"}, {"nixos", "\uf313"},
+      {"fedora", "\uf30a"},    {"debian", "\uf306"},
+      {"ubuntu", "\uf31b"},    {"manjaro", "\uf312"},
+      {"opensuse", "\uf314"},  {"void", "\uf32e"},
+      {"alpine", "\uf300"},    {"pop", "\uf32a"},
+      {"linuxmint", "\uf30e"}, {"mint", "\uf30e"},
+      {"endeavouros", "\uf322"}, {"asahi", "\uf302"},
+      {"fedora-asahi-remix", "\uf302"}, {NULL, NULL}};
+  for (int i = 0; map[i].id; i++)
+    if (strcasecmp(distro, map[i].id) == 0) return map[i].g;
+  return "\uf17c";
+}
+
+static char effective_label_buf[128];
+
+static const char *effective_label(const char *fallback) {
+  if (current_seq_idx < 0 || current_seq_idx >= MAX_FIELD_SEQ ||
+      !seq_label_override[current_seq_idx][0])
+    return fallback;
+  const char *ov = seq_label_override[current_seq_idx];
+  const char *icon = strstr(ov, "{icon}");
+  if (!icon) return ov;
+  const char *glyph = ff_distro_glyph(detected_distro);
+  int prefix = (int)(icon - ov);
+  snprintf(effective_label_buf, sizeof(effective_label_buf), "%.*s%s%s",
+           prefix, ov, glyph, icon + 6);
+  return effective_label_buf;
+}
+
 // Format a labeled info line using the configured label color.
 // If the current field already has a line index, update it in place.
 static void add_info(const char *label, const char *fmt, ...) {
@@ -671,24 +745,65 @@ static void add_info(const char *label, const char *fmt, ...) {
   va_end(ap);
 
   char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
-           val);
+  const char *sep = ff_mode_active ? ff_separator_str : ": ";
+  snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m%s%s",
+           effective_label_color(), effective_label(label), sep, val);
 
-  // Refresh tick: replace the field's line in place. Initial pass: always
-  // append a new line (so gathers that emit multiple rows, like multi-GPU,
-  // don't overwrite themselves).
+  // Refresh pass: update the same field's line in place (for uptime/memory/swap ticks)
   if (is_refresh_pass && current_field >= 0 && field_line[current_field] >= 0) {
     int idx = field_line[current_field];
     strncpy(fetch_lines[idx], line, MAX_LINE_LEN - 1);
     fetch_lines[idx][MAX_LINE_LEN - 1] = '\0';
     return;
   }
+  // Initial pass: always append a new line; track its index for refreshable fields
   if (current_field >= 0)
     field_line[current_field] = fetch_line_count;
   add_line(line);
 }
 
-static void gather_title(void) {
+static int title_len_cached = 20;
+
+// Substitute {N} tokens in fmt with tokens[N-1]. Writes up to outlen-1 bytes.
+static void ff_apply_tokens(const char *fmt, const char **tokens, int ntokens,
+                            char *out, int outlen) {
+  int oi = 0;
+  for (int i = 0; fmt[i] && oi + 1 < outlen;) {
+    if (fmt[i] == '{' && fmt[i + 1] >= '0' && fmt[i + 1] <= '9') {
+      int j = i + 1;
+      int num = 0;
+      while (fmt[j] >= '0' && fmt[j] <= '9') {
+        num = num * 10 + (fmt[j] - '0');
+        j++;
+      }
+      if (fmt[j] == '}' && num >= 1 && num <= ntokens && tokens[num - 1]) {
+        int len = (int)strlen(tokens[num - 1]);
+        if (oi + len >= outlen) len = outlen - oi - 1;
+        memcpy(out + oi, tokens[num - 1], len);
+        oi += len;
+        i = j + 1;
+        continue;
+      }
+    }
+    out[oi++] = fmt[i++];
+  }
+  out[oi] = '\0';
+}
+
+// Emit an info line using the per-module format (if set by a fastfetch config)
+// or the provided default format. Both are token-based: {1}, {2}, ...
+static void add_info_toks(const char *label, const char **tokens, int ntokens,
+                          const char *default_fmt) {
+  const char *fmt = (current_seq_idx >= 0 && current_seq_idx < MAX_FIELD_SEQ &&
+                     seq_format[current_seq_idx][0])
+                        ? seq_format[current_seq_idx]
+                        : default_fmt;
+  char buf[MAX_LINE_LEN];
+  ff_apply_tokens(fmt, tokens, ntokens, buf, sizeof(buf));
+  add_info(label, "%s", buf);
+}
+
+static void gather_title_line(void) {
   char user[64] = "";
   char host[64] = "";
   char *login = getlogin();
@@ -701,18 +816,20 @@ static void gather_title(void) {
   }
   gethostname(host, sizeof(host));
 
+  const char *color = effective_label_color();
   char line[MAX_LINE_LEN];
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m@\033[1;%sm%s\033[0m",
-           label_color, user, label_color, host);
+           color, user, color, host);
   add_line(line);
+  title_len_cached = strlen(user) + 1 + strlen(host);
+}
 
-  // separator
-  int title_len = strlen(user) + 1 + strlen(host);
+static void gather_separator_line(void) {
   char sep[MAX_LINE_LEN];
   int sep_char_len = strlen(config_separator);
   if (sep_char_len == 0) sep_char_len = 1;
   int pos = 0;
-  for (int i = 0; i < title_len && pos + sep_char_len < MAX_LINE_LEN; i++) {
+  for (int i = 0; i < title_len_cached && pos + sep_char_len < MAX_LINE_LEN; i++) {
     memcpy(sep + pos, config_separator, sep_char_len);
     pos += sep_char_len;
   }
@@ -953,7 +1070,7 @@ static void gather_display(void) {
   }
   closedir(d);
 
-  // Fallback for drivers that don't expose per-connector modes.
+  // Fallback for drivers that don't expose per-connector modes (rare on Linux).
   if (!emitted) {
     FILE *fp = popen("cat /sys/class/drm/card*/modes 2>/dev/null", "r");
     if (!fp) return;
@@ -968,6 +1085,27 @@ static void gather_display(void) {
   }
 }
 
+static const char *de_to_wm(const char *desktop) {
+  if (!desktop || !desktop[0]) return NULL;
+  // XDG_CURRENT_DESKTOP may be colon-separated (e.g. "KDE:Plasma"); match first token
+  char first[32];
+  int i = 0;
+  while (desktop[i] && desktop[i] != ':' && i < (int)sizeof(first) - 1) {
+    first[i] = desktop[i];
+    i++;
+  }
+  first[i] = '\0';
+  if (strcasecmp(first, "KDE") == 0) return "KWin";
+  if (strcasecmp(first, "GNOME") == 0) return "Mutter";
+  if (strcasecmp(first, "XFCE") == 0) return "xfwm4";
+  if (strcasecmp(first, "Cinnamon") == 0) return "Muffin";
+  if (strcasecmp(first, "MATE") == 0) return "Marco";
+  if (strcasecmp(first, "LXQt") == 0) return "Openbox";
+  if (strcasecmp(first, "Budgie") == 0) return "Mutter";
+  if (strcasecmp(first, "Deepin") == 0) return "KWin";
+  return NULL;
+}
+
 static void gather_wm(void) {
   // Check WAYLAND_DISPLAY or XDG_SESSION_TYPE to determine session type
   char *wayland = getenv("WAYLAND_DISPLAY");
@@ -976,28 +1114,9 @@ static void gather_wm(void) {
   int is_wayland = (wayland && wayland[0]) ||
                    (session && strcmp(session, "wayland") == 0);
 
-  // Try to figure out the WM name. $XDG_CURRENT_DESKTOP is the DE, not the
-  // WM, so map the common DEs to their WM. If we don't know, fall back to
-  // the DE string (old behaviour).
+  // Try to figure out the WM name
   char wm[64] = "";
-  const char *mapped = NULL;
-  if (desktop && desktop[0]) {
-    char first[32];
-    int n = 0;
-    while (desktop[n] && desktop[n] != ':' && n < (int)sizeof(first) - 1) {
-      first[n] = desktop[n];
-      n++;
-    }
-    first[n] = '\0';
-    if (strcasecmp(first, "KDE") == 0) mapped = "KWin";
-    else if (strcasecmp(first, "GNOME") == 0) mapped = "Mutter";
-    else if (strcasecmp(first, "XFCE") == 0) mapped = "xfwm4";
-    else if (strcasecmp(first, "Cinnamon") == 0) mapped = "Muffin";
-    else if (strcasecmp(first, "MATE") == 0) mapped = "Marco";
-    else if (strcasecmp(first, "LXQt") == 0) mapped = "Openbox";
-    else if (strcasecmp(first, "Budgie") == 0) mapped = "Mutter";
-    else if (strcasecmp(first, "Deepin") == 0) mapped = "KWin";
-  }
+  const char *mapped = de_to_wm(desktop);
   if (mapped) {
     strncpy(wm, mapped, sizeof(wm) - 1);
   } else if (desktop && desktop[0]) {
@@ -1035,6 +1154,359 @@ static void gather_wm(void) {
 
   if (wm[0])
     add_info("WM", "%s%s", wm, is_wayland ? " (Wayland)" : "");
+}
+
+static void gather_de(void) {
+  char *desktop = getenv("XDG_CURRENT_DESKTOP");
+  if (!desktop || !desktop[0]) return;
+
+  // Normalise name (first token of colon list)
+  char name[64] = "";
+  int i = 0;
+  while (desktop[i] && desktop[i] != ':' && i < (int)sizeof(name) - 1) {
+    name[i] = desktop[i];
+    i++;
+  }
+  name[i] = '\0';
+
+  // Pretty-print common variants
+  const char *pretty = name;
+  if (strcasecmp(name, "KDE") == 0) pretty = "KDE Plasma";
+  else if (strcasecmp(name, "GNOME") == 0) pretty = "GNOME";
+
+  // Try to get a version
+  char version[64] = "";
+  const char *vcmd = NULL;
+  if (strcasecmp(name, "KDE") == 0)
+    vcmd = "plasmashell --version 2>/dev/null";
+  else if (strcasecmp(name, "GNOME") == 0)
+    vcmd = "gnome-shell --version 2>/dev/null";
+  else if (strcasecmp(name, "XFCE") == 0)
+    vcmd = "xfce4-session --version 2>/dev/null";
+  else if (strcasecmp(name, "Cinnamon") == 0)
+    vcmd = "cinnamon --version 2>/dev/null";
+  else if (strcasecmp(name, "MATE") == 0)
+    vcmd = "mate-session --version 2>/dev/null";
+
+  if (vcmd) {
+    FILE *fp = popen(vcmd, "r");
+    if (fp) {
+      char buf[128];
+      if (fgets(buf, sizeof(buf), fp)) {
+        char *v = buf;
+        while (*v && !(*v >= '0' && *v <= '9')) v++;
+        if (*v) {
+          int n = 0;
+          while (v[n] && v[n] != ' ' && v[n] != '\n' && v[n] != '\r' &&
+                 n < (int)sizeof(version) - 1) {
+            version[n] = v[n];
+            n++;
+          }
+          version[n] = '\0';
+        }
+      }
+      pclose(fp);
+    }
+  }
+
+  if (version[0])
+    add_info("DE", "%s %s", pretty, version);
+  else
+    add_info("DE", "%s", pretty);
+}
+
+static void gather_lm(void) {
+  // /etc/systemd/system/display-manager.service is a symlink to the DM unit
+  char buf[256];
+  ssize_t n = readlink("/etc/systemd/system/display-manager.service", buf,
+                       sizeof(buf) - 1);
+  char name[64] = "";
+  if (n > 0) {
+    buf[n] = '\0';
+    const char *base = strrchr(buf, '/');
+    base = base ? base + 1 : buf;
+    // Strip .service suffix
+    strncpy(name, base, sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    char *dot = strstr(name, ".service");
+    if (dot) *dot = '\0';
+  }
+  // Fallback: scan process list for common DMs
+  if (!name[0]) {
+    FILE *fp = popen("ps -e -o comm= 2>/dev/null", "r");
+    if (fp) {
+      char line[64];
+      while (fgets(line, sizeof(line), fp)) {
+        int l = strlen(line);
+        while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
+          line[--l] = '\0';
+        if (!strcmp(line, "sddm") || !strcmp(line, "gdm") ||
+            !strcmp(line, "gdm3") || !strcmp(line, "lightdm") ||
+            !strcmp(line, "lxdm") || !strcmp(line, "ly")) {
+          strncpy(name, line, sizeof(name) - 1);
+          name[sizeof(name) - 1] = '\0';
+          break;
+        }
+      }
+      pclose(fp);
+    }
+  }
+  if (!name[0]) return;
+
+  char *session = getenv("XDG_SESSION_TYPE");
+  if (session && session[0])
+    add_info("LM", "%s (%s)", name, (strcmp(session, "wayland") == 0) ? "Wayland" :
+                                    (strcmp(session, "x11") == 0) ? "X11" : session);
+  else
+    add_info("LM", "%s", name);
+}
+
+static void gather_brightness(void) {
+  DIR *d = opendir("/sys/class/backlight");
+  if (!d) return;
+  struct dirent *ent;
+  while ((ent = readdir(d))) {
+    if (ent->d_name[0] == '.') continue;
+    char path[320];
+    long cur = -1, max = -1;
+
+    snprintf(path, sizeof(path), "/sys/class/backlight/%s/brightness", ent->d_name);
+    FILE *fp = fopen(path, "r");
+    if (fp) {
+      char buf[32];
+      if (fgets(buf, sizeof(buf), fp)) cur = atol(buf);
+      fclose(fp);
+    }
+    snprintf(path, sizeof(path), "/sys/class/backlight/%s/max_brightness", ent->d_name);
+    fp = fopen(path, "r");
+    if (fp) {
+      char buf[32];
+      if (fgets(buf, sizeof(buf), fp)) max = atol(buf);
+      fclose(fp);
+    }
+    if (cur < 0 || max <= 0) continue;
+    int pct = (int)((cur * 100 + max / 2) / max);
+    add_info("Brightness", "%d%% [%s]", pct, ent->d_name);
+  }
+  closedir(d);
+}
+
+static void gather_poweradapter(void) {
+  DIR *d = opendir("/sys/class/power_supply");
+  if (!d) return;
+  struct dirent *ent;
+  while ((ent = readdir(d))) {
+    if (ent->d_name[0] == '.') continue;
+    char path[320];
+    snprintf(path, sizeof(path), "/sys/class/power_supply/%s/type", ent->d_name);
+    FILE *fp = fopen(path, "r");
+    if (!fp) continue;
+    char type[32] = "";
+    if (fgets(type, sizeof(type), fp)) {
+      int l = strlen(type);
+      while (l > 0 && (type[l - 1] == '\n' || type[l - 1] == '\r'))
+        type[--l] = '\0';
+    }
+    fclose(fp);
+    if (strcmp(type, "Mains") != 0) continue;
+
+    snprintf(path, sizeof(path), "/sys/class/power_supply/%s/online", ent->d_name);
+    fp = fopen(path, "r");
+    int online = -1;
+    if (fp) {
+      char buf[8];
+      if (fgets(buf, sizeof(buf), fp)) online = atoi(buf);
+      fclose(fp);
+    }
+    if (online == 1) add_info("Power Adapter", "AC Connected");
+    else if (online == 0) add_info("Power Adapter", "Disconnected");
+    break;
+  }
+  closedir(d);
+}
+
+static int read_first_line(const char *cmd, char *out, int outlen) {
+  FILE *fp = popen(cmd, "r");
+  if (!fp) return 0;
+  int ok = 0;
+  if (fgets(out, outlen, fp)) {
+    int l = strlen(out);
+    while (l > 0 && (out[l - 1] == '\n' || out[l - 1] == '\r'))
+      out[--l] = '\0';
+    ok = (l > 0);
+  } else {
+    out[0] = '\0';
+  }
+  pclose(fp);
+  return ok;
+}
+
+static void gather_sound(void) {
+  char desc[192] = "";
+  FILE *fp = popen("wpctl inspect @DEFAULT_SINK@ 2>/dev/null", "r");
+  if (fp) {
+    char buf[256];
+    while (fgets(buf, sizeof(buf), fp)) {
+      char *p = strstr(buf, "node.description");
+      if (!p) continue;
+      char *eq = strchr(p, '=');
+      if (!eq) continue;
+      char *q = strchr(eq, '"');
+      if (!q) continue;
+      q++;
+      char *q2 = strchr(q, '"');
+      if (!q2) continue;
+      int n = (int)(q2 - q);
+      if (n >= (int)sizeof(desc)) n = sizeof(desc) - 1;
+      memcpy(desc, q, n);
+      desc[n] = '\0';
+      break;
+    }
+    pclose(fp);
+  }
+  int volpct = -1;
+  char vbuf[64];
+  if (read_first_line("wpctl get-volume @DEFAULT_SINK@ 2>/dev/null", vbuf,
+                      sizeof(vbuf))) {
+    float v = 0;
+    if (sscanf(vbuf, "Volume: %f", &v) == 1)
+      volpct = (int)(v * 100 + 0.5f);
+  }
+  if (!desc[0]) {
+    // Fallback: just the default sink name
+    if (!read_first_line("pactl get-default-sink 2>/dev/null", desc, sizeof(desc)))
+      return;
+  }
+  if (volpct >= 0)
+    add_info("Sound", "%s (%d%%)", desc, volpct);
+  else if (desc[0])
+    add_info("Sound", "%s", desc);
+}
+
+static void gather_bluetooth(void) {
+  FILE *fp = popen("bluetoothctl devices Connected 2>/dev/null", "r");
+  if (!fp) return;
+  char buf[256], out[512] = "";
+  int count = 0;
+  while (fgets(buf, sizeof(buf), fp)) {
+    // "Device AA:BB:CC:DD:EE:FF Name Of Device"
+    char *sp1 = strchr(buf, ' ');
+    if (!sp1) continue;
+    char *sp2 = strchr(sp1 + 1, ' ');
+    if (!sp2) continue;
+    char *name = sp2 + 1;
+    int l = strlen(name);
+    while (l > 0 && (name[l - 1] == '\n' || name[l - 1] == '\r'))
+      name[--l] = '\0';
+    if (!name[0]) continue;
+    if (count > 0) strncat(out, ", ", sizeof(out) - strlen(out) - 1);
+    strncat(out, name, sizeof(out) - strlen(out) - 1);
+    count++;
+  }
+  pclose(fp);
+  if (count > 0) add_info("Bluetooth", "%s", out);
+}
+
+static void gather_wifi(void) {
+  // Prefer nmcli
+  FILE *fp = popen(
+      "nmcli -t -f ACTIVE,SSID,SIGNAL device wifi 2>/dev/null | grep '^yes:'",
+      "r");
+  if (fp) {
+    char buf[256];
+    if (fgets(buf, sizeof(buf), fp)) {
+      int l = strlen(buf);
+      while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r'))
+        buf[--l] = '\0';
+      // yes:SSID:SIGNAL
+      char *c1 = strchr(buf, ':');
+      if (c1) {
+        char *ssid = c1 + 1;
+        char *c2 = strchr(ssid, ':');
+        if (c2) {
+          *c2 = '\0';
+          int sig = atoi(c2 + 1);
+          if (ssid[0]) {
+            if (sig > 0) add_info("Wi-Fi", "%s (%d%%)", ssid, sig);
+            else add_info("Wi-Fi", "%s", ssid);
+          }
+          pclose(fp);
+          return;
+        }
+      }
+    }
+    pclose(fp);
+  }
+  // Fallback: iw dev link (if iw is installed)
+  fp = popen("iw dev 2>/dev/null | awk '/Interface/{i=$2} /ssid/{print i\":\"$2; exit}'", "r");
+  if (fp) {
+    char buf[128];
+    if (fgets(buf, sizeof(buf), fp)) {
+      int l = strlen(buf);
+      while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r'))
+        buf[--l] = '\0';
+      char *c = strchr(buf, ':');
+      if (c) {
+        *c = '\0';
+        add_info("Wi-Fi", "%s (%s)", c + 1, buf);
+      }
+    }
+    pclose(fp);
+  }
+}
+
+// List running MPRIS players. Tries `playerctl -l`; falls back to scanning
+// the session bus for active org.mpris.MediaPlayer2.* services via busctl.
+static void gather_player(void) {
+  char out[256] = "";
+  int count = 0;
+
+  FILE *fp = popen("playerctl -l 2>/dev/null", "r");
+  if (fp) {
+    char buf[128];
+    while (fgets(buf, sizeof(buf), fp)) {
+      int l = strlen(buf);
+      while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r')) buf[--l] = '\0';
+      if (!buf[0]) continue;
+      if (count > 0) strncat(out, ", ", sizeof(out) - strlen(out) - 1);
+      strncat(out, buf, sizeof(out) - strlen(out) - 1);
+      count++;
+    }
+    pclose(fp);
+  }
+  if (!count) {
+    // Fallback via busctl: list session-bus names, filter MPRIS, drop activatable.
+    fp = popen(
+        "busctl --user list --no-legend --acquired 2>/dev/null "
+        "| awk '$1 ~ /^org\\.mpris\\.MediaPlayer2\\./ "
+        "{ sub(\"org.mpris.MediaPlayer2.\", \"\", $1); print $1 }'",
+        "r");
+    if (fp) {
+      char buf[128];
+      while (fgets(buf, sizeof(buf), fp)) {
+        int l = strlen(buf);
+        while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r')) buf[--l] = '\0';
+        if (!buf[0]) continue;
+        if (count > 0) strncat(out, ", ", sizeof(out) - strlen(out) - 1);
+        strncat(out, buf, sizeof(out) - strlen(out) - 1);
+        count++;
+      }
+      pclose(fp);
+    }
+  }
+  if (count > 0) add_info("Media Player", "%s", out);
+}
+
+// Current MPRIS "Now Playing" via playerctl metadata.
+static void gather_media(void) {
+  char buf[256];
+  if (!read_first_line(
+          "playerctl metadata --format '{{artist}} - {{title}}' 2>/dev/null",
+          buf, sizeof(buf)))
+    return;
+  // Skip empty/placeholder output when nothing is loaded.
+  if (!buf[0] || !strcmp(buf, " - ") || !strcmp(buf, "-")) return;
+  add_info("Media", "%s", buf);
 }
 
 static void gather_cpu(void) {
@@ -1118,10 +1590,8 @@ static void gather_cpu(void) {
   }
 }
 
-// Extract the human product name from `lspci -d VVVV:DDDD` output.
-// Example input: "01:00.0 VGA compatible controller: NVIDIA Corporation
-// AD106M [GeForce RTX 4070 Max-Q / Mobile] (rev a1)"
-// We prefer the bracket content; otherwise the chunk after "Corporation ".
+// Extract a human GPU name from `lspci -d VVVV:DDDD` output.
+// Typical line: "01:00.0 VGA compatible controller: NVIDIA Corporation ..."
 static int gpu_lookup_lspci(const char *pci_id, char *out, int outlen) {
   if (!pci_id || !pci_id[0]) return 0;
   char cmd[128];
@@ -1134,37 +1604,36 @@ static int gpu_lookup_lspci(const char *pci_id, char *out, int outlen) {
     int l = strlen(line);
     while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
       line[--l] = '\0';
-    char *rev = strstr(line, " (rev ");
-    if (rev) *rev = '\0';
-    char *lb = strrchr(line, '[');
-    char *rb = strrchr(line, ']');
-    const char *name = NULL;
-    if (lb && rb && rb > lb) {
-      *rb = '\0';
-      name = lb + 1;
-    } else {
-      char *corp = strstr(line, " Corporation ");
-      int skip = corp ? 13 : 0;
-      if (!corp) { corp = strstr(line, " Corp "); if (corp) skip = 6; }
-      // Skip past "bus:dev.fn class:" prefix even if no Corporation.
-      if (!corp) {
-        char *c1 = strchr(line, ':');
-        if (c1) {
-          char *c2 = strchr(c1 + 1, ':');
-          if (c2) { corp = c2; skip = 1; }
-        }
+    // Find the second ":" which separates class from name
+    char *c1 = strchr(line, ':');
+    if (c1) {
+      char *c2 = strchr(c1 + 1, ':');
+      if (c2) {
+        char *nm = c2 + 1;
+        while (*nm == ' ') nm++;
+        // Strip trailing " (rev XX)"
+        char *rev = strstr(nm, " (rev ");
+        if (rev) *rev = '\0';
+        strncpy(out, nm, outlen - 1);
+        out[outlen - 1] = '\0';
+        ok = 1;
       }
-      name = corp ? (corp + skip) : line;
-      while (*name == ' ') name++;
-    }
-    if (name && *name) {
-      strncpy(out, name, outlen - 1);
-      out[outlen - 1] = '\0';
-      ok = 1;
     }
   }
   pclose(fp);
   return ok;
+}
+
+static void gpu_pci_vendor(const char *pci_id, char *out, int outlen) {
+  out[0] = '\0';
+  if (!pci_id || strlen(pci_id) < 4) return;
+  char v[5] = {0};
+  memcpy(v, pci_id, 4);
+  if (strcasecmp(v, "10de") == 0) strncpy(out, "NVIDIA", outlen - 1);
+  else if (strcasecmp(v, "8086") == 0) strncpy(out, "Intel", outlen - 1);
+  else if (strcasecmp(v, "1002") == 0) strncpy(out, "AMD", outlen - 1);
+  else if (strcasecmp(v, "106b") == 0) strncpy(out, "Apple", outlen - 1);
+  out[outlen - 1] = '\0';
 }
 
 static void gather_gpu(void) {
@@ -1172,7 +1641,6 @@ static void gather_gpu(void) {
   if (!d) return;
   struct dirent *ent;
   while ((ent = readdir(d))) {
-    // Only cardN (not cardN-CONNECTOR or renderD*)
     if (strncmp(ent->d_name, "card", 4) != 0) continue;
     int all_digits = 1;
     for (int i = 4; ent->d_name[i]; i++) {
@@ -1206,10 +1674,12 @@ static void gather_gpu(void) {
     }
     fclose(fp);
 
+    char vendor[32] = "";
     char name[160] = "";
     const char *type = "";
 
     if (strncmp(compat, "apple,agx", 9) == 0) {
+      strcpy(vendor, "Apple");
       char cpu[64] = "";
       FILE *mfp = fopen("/proc/device-tree/model", "r");
       if (mfp) {
@@ -1226,29 +1696,50 @@ static void gather_gpu(void) {
         }
         fclose(mfp);
       }
-      if (cpu[0]) snprintf(name, sizeof(name), "Apple %s", cpu);
+      if (cpu[0]) strncpy(name, cpu, sizeof(name) - 1);
       else strcpy(name, "Apple GPU");
       type = "Integrated";
-    } else if (pci_id[0] && gpu_lookup_lspci(pci_id, name, sizeof(name))) {
-      // lspci gave us a human name.
-    } else if (strcmp(driver, "i915") == 0 || strcmp(driver, "xe") == 0) {
-      strcpy(name, "Intel Graphics");
-    } else if (strcmp(driver, "amdgpu") == 0 || strcmp(driver, "radeon") == 0) {
-      strcpy(name, "AMD Graphics");
-    } else if (strcmp(driver, "nvidia") == 0 || strcmp(driver, "nouveau") == 0) {
-      strcpy(name, "NVIDIA GPU");
-    } else if (driver[0]) {
-      strncpy(name, driver, sizeof(name) - 1);
-    }
-
-    if (!type[0]) {
-      if (!strcmp(driver, "i915") || !strcmp(driver, "xe")) type = "Integrated";
-      else if (!strcmp(driver, "nvidia") || !strcmp(driver, "nouveau")) type = "Discrete";
+    } else {
+      gpu_pci_vendor(pci_id, vendor, sizeof(vendor));
+      if (!vendor[0]) {
+        if (!strcmp(driver, "nvidia") || !strcmp(driver, "nouveau")) strcpy(vendor, "NVIDIA");
+        else if (!strcmp(driver, "i915") || !strcmp(driver, "xe")) strcpy(vendor, "Intel");
+        else if (!strcmp(driver, "amdgpu") || !strcmp(driver, "radeon")) strcpy(vendor, "AMD");
+      }
+      char lspci_line[160] = "";
+      if (pci_id[0] && gpu_lookup_lspci(pci_id, lspci_line, sizeof(lspci_line))) {
+        // Prefer bracket content (the human product name)
+        char *lb = strrchr(lspci_line, '[');
+        char *rb = strrchr(lspci_line, ']');
+        if (lb && rb && rb > lb) {
+          *rb = '\0';
+          strncpy(name, lb + 1, sizeof(name) - 1);
+        } else {
+          // No bracket: use the part after " Corporation " / " Corp " if present
+          char *corp = strstr(lspci_line, " Corporation ");
+          int skip = corp ? 13 : 0;
+          if (!corp) { corp = strstr(lspci_line, " Corp "); if (corp) skip = 6; }
+          const char *src = corp ? (corp + skip) : lspci_line;
+          strncpy(name, src, sizeof(name) - 1);
+        }
+        name[sizeof(name) - 1] = '\0';
+      }
+      if (!name[0]) {
+        if (vendor[0]) snprintf(name, sizeof(name), "%s Graphics", vendor);
+        else if (driver[0]) strncpy(name, driver, sizeof(name) - 1);
+      }
+      if (!type[0]) {
+        if (!strcmp(driver, "i915") || !strcmp(driver, "xe")) type = "Integrated";
+        else if (!strcmp(driver, "nvidia") || !strcmp(driver, "nouveau")) type = "Discrete";
+      }
     }
 
     if (!name[0]) continue;
-    if (type[0]) add_info("GPU", "%s [%s]", name, type);
-    else add_info("GPU", "%s", name);
+
+    const char *toks[7] = {
+        vendor, name, driver, "", "", type, ""};
+    const char *default_fmt = type[0] ? "{2} [{6}]" : "{2}";
+    add_info_toks("GPU", toks, 7, default_fmt);
   }
   closedir(d);
 }
@@ -1595,22 +2086,25 @@ static void read_gtk_setting(const char *key, char *out, int maxlen) {
 static void gather_theme(void) {
   char theme[64] = "";
   read_gtk_setting("gtk-theme-name", theme, sizeof(theme));
-  if (theme[0])
-    add_info("Theme", "%s [GTK3]", theme);
+  if (!theme[0]) return;
+  const char *toks[2] = { theme, "GTK3" };
+  add_info_toks("Theme", toks, 2, "{1} [{2}]");
 }
 
 static void gather_icons(void) {
   char icons[64] = "";
   read_gtk_setting("gtk-icon-theme-name", icons, sizeof(icons));
-  if (icons[0])
-    add_info("Icons", "%s [GTK3]", icons);
+  if (!icons[0]) return;
+  const char *toks[2] = { icons, "GTK3" };
+  add_info_toks("Icons", toks, 2, "{1} [{2}]");
 }
 
 static void gather_font(void) {
   char font[128] = "";
   read_gtk_setting("gtk-font-name", font, sizeof(font));
-  if (font[0])
-    add_info("Font", "%s [GTK3]", font);
+  if (!font[0]) return;
+  const char *toks[2] = { font, "GTK3" };
+  add_info_toks("Font", toks, 2, "{1} [{2}]");
 }
 
 // Screen buffer: each cell holds one UTF-8 codepoint (up to 4 bytes + NUL)
@@ -1842,6 +2336,464 @@ static void set_distro_colors(const char *distro) {
   }
 }
 
+// --- fastfetch config support ---
+// Parse fastfetch's JSONC config and use only its `modules` array to drive
+// fetch's field order and per-field label/color overrides. Data is still
+// gathered natively by fetch; only presentation is borrowed.
+
+enum { F_CUSTOM_MARKER = -2 }; // special value returned by module mapper
+
+static int ff_module_to_field(const char *type) {
+  struct { const char *t; int id; } map[] = {
+      {"os", F_OS},             {"host", F_HOST},
+      {"kernel", F_KERNEL},     {"uptime", F_UPTIME},
+      {"packages", F_PACKAGES}, {"shell", F_SHELL},
+      {"display", F_DISPLAY},   {"wm", F_WM},
+      {"wmtheme", F_THEME},     {"theme", F_THEME},
+      {"icons", F_ICONS},       {"font", F_FONT},
+      {"terminalfont", F_FONT}, {"terminal", F_TERMINAL},
+      {"cpu", F_CPU},           {"gpu", F_GPU},
+      {"memory", F_MEMORY},     {"swap", F_SWAP},
+      {"disk", F_DISK},         {"localip", F_IP},
+      {"ip", F_IP},             {"battery", F_BATTERY},
+      {"locale", F_LOCALE},     {"colors", F_COLORS},
+      {"title", F_TITLE},       {"separator", F_SEPARATOR},
+      {"break", F_BREAK},       {"de", F_DE},
+      {"lm", F_LM},             {"brightness", F_BRIGHTNESS},
+      {"poweradapter", F_POWERADAPTER}, {"sound", F_SOUND},
+      {"bluetooth", F_BLUETOOTH}, {"wifi", F_WIFI},
+      {"player", F_PLAYER}, {"media", F_MEDIA},
+      {NULL, -1}};
+  if (strcasecmp(type, "custom") == 0)
+    return F_CUSTOM_MARKER;
+  for (int i = 0; map[i].t; i++)
+    if (strcasecmp(type, map[i].t) == 0)
+      return map[i].id;
+  return -1;
+}
+
+// Render a fastfetch `custom` module format string as a single line.
+// Handles {$N} (display.constants[N-1]) and {#...} (ANSI SGR escapes).
+// Wraps the whole line in outputColor if present.
+static void ff_render_custom(const char *fmt, const char *outputColor) {
+  char out[MAX_LINE_LEN];
+  int oi = 0;
+
+  if (outputColor && outputColor[0]) {
+    int n = snprintf(out + oi, sizeof(out) - oi, "\033[%sm", outputColor);
+    if (n > 0) oi += n;
+  }
+
+  for (int i = 0; fmt[i] && oi + 8 < (int)sizeof(out);) {
+    if (fmt[i] == '{' && fmt[i + 1] == '$') {
+      int j = i + 2;
+      int num = 0;
+      while (fmt[j] >= '0' && fmt[j] <= '9') { num = num * 10 + (fmt[j] - '0'); j++; }
+      if (fmt[j] == '}' && num >= 1 && num <= ff_constants_count) {
+        int len = (int)strlen(ff_constants[num - 1]);
+        if (oi + len < (int)sizeof(out)) {
+          memcpy(out + oi, ff_constants[num - 1], len);
+          oi += len;
+        }
+        i = j + 1;
+        continue;
+      }
+    }
+    if (fmt[i] == '{' && fmt[i + 1] == '#') {
+      int j = i + 2;
+      while ((fmt[j] >= '0' && fmt[j] <= '9') || fmt[j] == ';') j++;
+      if (fmt[j] == '}') {
+        int plen = j - (i + 2);
+        char esc[32];
+        if (plen == 0) strcpy(esc, "\033[0m");
+        else if (plen < 29) snprintf(esc, sizeof(esc), "\033[%.*sm", plen, fmt + i + 2);
+        else esc[0] = '\0';
+        int elen = (int)strlen(esc);
+        if (oi + elen < (int)sizeof(out)) {
+          memcpy(out + oi, esc, elen);
+          oi += elen;
+        }
+        i = j + 1;
+        continue;
+      }
+    }
+    out[oi++] = fmt[i++];
+  }
+
+  if (outputColor && outputColor[0] && oi + 5 < (int)sizeof(out)) {
+    memcpy(out + oi, "\033[0m", 4);
+    oi += 4;
+  }
+
+  out[oi] = '\0';
+  add_line(out);
+}
+
+static void ff_color_to_ansi(const char *in, char *out, int outlen) {
+  struct { const char *name; const char *code; } nm[] = {
+      {"black", "30"},        {"red", "31"},         {"green", "32"},
+      {"yellow", "33"},       {"blue", "34"},        {"magenta", "35"},
+      {"cyan", "36"},         {"white", "37"},       {"default", "39"},
+      {"light_black", "90"},  {"light_red", "91"},   {"light_green", "92"},
+      {"light_yellow", "93"}, {"light_blue", "94"},  {"light_magenta", "95"},
+      {"light_cyan", "96"},   {"light_white", "97"}, {NULL, NULL}};
+  for (int i = 0; nm[i].name; i++) {
+    if (strcasecmp(in, nm[i].name) == 0) {
+      strncpy(out, nm[i].code, outlen - 1);
+      out[outlen - 1] = '\0';
+      return;
+    }
+  }
+  strncpy(out, in, outlen - 1);
+  out[outlen - 1] = '\0';
+}
+
+static int strip_jsonc_comments(char *s, int len) {
+  char *r = s, *w = s, *end = s + len;
+  int in_str = 0, esc = 0;
+  while (r < end) {
+    char c = *r;
+    if (in_str) {
+      *w++ = c;
+      if (esc) esc = 0;
+      else if (c == '\\') esc = 1;
+      else if (c == '"') in_str = 0;
+      r++;
+      continue;
+    }
+    if (c == '"') { in_str = 1; *w++ = c; r++; continue; }
+    if (c == '/' && r + 1 < end) {
+      if (r[1] == '/') {
+        r += 2;
+        while (r < end && *r != '\n') r++;
+        continue;
+      }
+      if (r[1] == '*') {
+        r += 2;
+        while (r + 1 < end && !(r[0] == '*' && r[1] == '/')) r++;
+        if (r + 1 < end) r += 2;
+        continue;
+      }
+    }
+    *w++ = c;
+    r++;
+  }
+  return (int)(w - s);
+}
+
+static const char *ff_skip_ws(const char *p) {
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+    p++;
+  return p;
+}
+
+static const char *ff_parse_string(const char *p, char *out, int outlen) {
+  if (*p != '"') return NULL;
+  p++;
+  int n = 0;
+  while (*p && *p != '"') {
+    if (*p == '\\' && p[1]) {
+      char c = p[1];
+      if (c == 'n') { if (n + 1 < outlen) out[n++] = '\n'; }
+      else if (c == 't') { if (n + 1 < outlen) out[n++] = '\t'; }
+      else if (c == 'r') { if (n + 1 < outlen) out[n++] = '\r'; }
+      else if (c == '\\' || c == '"' || c == '/') {
+        if (n + 1 < outlen) out[n++] = c;
+      } else if (c == 'u' && p[2] && p[3] && p[4] && p[5]) {
+        char hex[5];
+        memcpy(hex, p + 2, 4);
+        hex[4] = '\0';
+        unsigned int cp = (unsigned int)strtoul(hex, NULL, 16);
+        if (cp < 0x80) {
+          if (n + 1 < outlen) out[n++] = (char)cp;
+        } else if (cp < 0x800) {
+          if (n + 2 < outlen) {
+            out[n++] = (char)(0xC0 | (cp >> 6));
+            out[n++] = (char)(0x80 | (cp & 0x3F));
+          }
+        } else {
+          if (n + 3 < outlen) {
+            out[n++] = (char)(0xE0 | (cp >> 12));
+            out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[n++] = (char)(0x80 | (cp & 0x3F));
+          }
+        }
+        p += 6;
+        continue;
+      } else {
+        if (n + 1 < outlen) out[n++] = c;
+      }
+      p += 2;
+    } else {
+      if (n + 1 < outlen) out[n++] = *p;
+      p++;
+    }
+  }
+  if (*p != '"') return NULL;
+  if (n < outlen) out[n] = '\0';
+  else out[outlen - 1] = '\0';
+  return p + 1;
+}
+
+static const char *ff_skip_value(const char *p) {
+  p = ff_skip_ws(p);
+  if (*p == '"') {
+    char tmp[4];
+    return ff_parse_string(p, tmp, sizeof(tmp));
+  }
+  if (*p == '{' || *p == '[') {
+    char open = *p, close = (open == '{') ? '}' : ']';
+    int depth = 0;
+    while (*p) {
+      if (*p == '"') {
+        char tmp[4];
+        const char *n = ff_parse_string(p, tmp, sizeof(tmp));
+        if (!n) return NULL;
+        p = n;
+        continue;
+      }
+      if (*p == open) depth++;
+      else if (*p == close) {
+        depth--;
+        if (depth == 0) return p + 1;
+      }
+      p++;
+    }
+    return NULL;
+  }
+  while (*p && *p != ',' && *p != '}' && *p != ']' && *p != ' ' &&
+         *p != '\t' && *p != '\n' && *p != '\r')
+    p++;
+  return p;
+}
+
+static const char *ff_parse_display(const char *p) {
+  if (*p != '{') return NULL;
+  p++;
+  p = ff_skip_ws(p);
+  while (*p && *p != '}') {
+    if (*p != '"') return NULL;
+    char k[32];
+    const char *n = ff_parse_string(p, k, sizeof(k));
+    if (!n) return NULL;
+    p = ff_skip_ws(n);
+    if (*p != ':') return NULL;
+    p = ff_skip_ws(p + 1);
+    if (strcmp(k, "separator") == 0 && *p == '"') {
+      p = ff_parse_string(p, ff_separator_str, sizeof(ff_separator_str));
+      if (!p) return NULL;
+    } else if (strcmp(k, "constants") == 0 && *p == '[') {
+      p++;
+      p = ff_skip_ws(p);
+      ff_constants_count = 0;
+      while (*p && *p != ']') {
+        if (*p == '"') {
+          char slot[MAX_FF_CONSTANT_LEN];
+          const char *after = ff_parse_string(p, slot, sizeof(slot));
+          if (!after) return NULL;
+          if (ff_constants_count < MAX_FF_CONSTANTS) {
+            strncpy(ff_constants[ff_constants_count], slot,
+                    MAX_FF_CONSTANT_LEN - 1);
+            ff_constants[ff_constants_count][MAX_FF_CONSTANT_LEN - 1] = '\0';
+            ff_constants_count++;
+          }
+          p = after;
+        } else {
+          p = ff_skip_value(p);
+          if (!p) return NULL;
+        }
+        p = ff_skip_ws(p);
+        if (*p == ',') { p++; p = ff_skip_ws(p); }
+      }
+      if (*p == ']') p++;
+    } else {
+      p = ff_skip_value(p);
+      if (!p) return NULL;
+    }
+    p = ff_skip_ws(p);
+    if (*p == ',') { p++; p = ff_skip_ws(p); }
+  }
+  if (*p == '}') return p + 1;
+  return NULL;
+}
+
+// Walk top-level object, extract display block, return pointer to the opening
+// '[' of the modules array (or NULL if not found).
+static const char *ff_walk_top(const char *p) {
+  p = ff_skip_ws(p);
+  if (*p != '{') return NULL;
+  p++;
+  p = ff_skip_ws(p);
+  const char *modules_p = NULL;
+  while (*p && *p != '}') {
+    if (*p != '"') return NULL;
+    char key[64];
+    const char *next = ff_parse_string(p, key, sizeof(key));
+    if (!next) return NULL;
+    p = ff_skip_ws(next);
+    if (*p != ':') return NULL;
+    p = ff_skip_ws(p + 1);
+    if (strcmp(key, "modules") == 0 && *p == '[') {
+      modules_p = p;
+      p = ff_skip_value(p);
+      if (!p) return NULL;
+    } else if (strcmp(key, "display") == 0 && *p == '{') {
+      p = ff_parse_display(p);
+      if (!p) return NULL;
+    } else {
+      p = ff_skip_value(p);
+      if (!p) return NULL;
+    }
+    p = ff_skip_ws(p);
+    if (*p == ',') { p++; p = ff_skip_ws(p); }
+  }
+  return modules_p;
+}
+
+typedef struct {
+  char type[32];
+  char key[64];
+  char keyColor[32];
+  char format[512];
+  char outputColor[32];
+} ff_mod_t;
+
+static const char *ff_parse_module_obj(const char *p, ff_mod_t *m) {
+  if (*p != '{') return NULL;
+  p++;
+  p = ff_skip_ws(p);
+  m->type[0] = m->key[0] = m->keyColor[0] = m->format[0] = m->outputColor[0] = '\0';
+  while (*p && *p != '}') {
+    if (*p != '"') return NULL;
+    char kname[32];
+    const char *n = ff_parse_string(p, kname, sizeof(kname));
+    if (!n) return NULL;
+    p = ff_skip_ws(n);
+    if (*p != ':') return NULL;
+    p = ff_skip_ws(p + 1);
+    if (strcmp(kname, "type") == 0 && *p == '"') {
+      p = ff_parse_string(p, m->type, sizeof(m->type));
+    } else if (strcmp(kname, "key") == 0 && *p == '"') {
+      p = ff_parse_string(p, m->key, sizeof(m->key));
+    } else if (strcmp(kname, "keyColor") == 0 && *p == '"') {
+      p = ff_parse_string(p, m->keyColor, sizeof(m->keyColor));
+    } else if (strcmp(kname, "format") == 0 && *p == '"') {
+      p = ff_parse_string(p, m->format, sizeof(m->format));
+    } else if (strcmp(kname, "outputColor") == 0 && *p == '"') {
+      p = ff_parse_string(p, m->outputColor, sizeof(m->outputColor));
+    } else {
+      p = ff_skip_value(p);
+    }
+    if (!p) return NULL;
+    p = ff_skip_ws(p);
+    if (*p == ',') { p++; p = ff_skip_ws(p); }
+  }
+  if (*p == '}') return p + 1;
+  return NULL;
+}
+
+static int load_fastfetch_config(const char *path) {
+  FILE *fp = fopen(path, "r");
+  if (!fp) {
+    fprintf(stderr, "fetch: cannot open fastfetch config: %s\n", path);
+    return 0;
+  }
+  if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return 0; }
+  long sz = ftell(fp);
+  if (sz <= 0 || sz > (1L << 20)) { fclose(fp); return 0; }
+  if (fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return 0; }
+  char *buf = (char *)malloc((size_t)sz + 1);
+  if (!buf) { fclose(fp); return 0; }
+  size_t got = fread(buf, 1, (size_t)sz, fp);
+  fclose(fp);
+  if (got != (size_t)sz) { free(buf); return 0; }
+  buf[sz] = '\0';
+
+  int len = strip_jsonc_comments(buf, (int)sz);
+  buf[len] = '\0';
+
+  const char *p = ff_walk_top(buf);
+  if (!p) {
+    fprintf(stderr, "fetch: no \"modules\" array in %s\n", path);
+    free(buf);
+    return 0;
+  }
+  p++; // past '['
+  p = ff_skip_ws(p);
+
+  for (int i = 0; i < F_COUNT; i++) field_enabled[i] = 0;
+  field_count = 0;
+
+  while (*p && *p != ']' && field_count < MAX_FIELD_SEQ) {
+    ff_mod_t m;
+    m.type[0] = m.key[0] = m.keyColor[0] = m.format[0] = m.outputColor[0] = '\0';
+    if (*p == '"') {
+      p = ff_parse_string(p, m.type, sizeof(m.type));
+      if (!p) break;
+    } else if (*p == '{') {
+      p = ff_parse_module_obj(p, &m);
+      if (!p) break;
+    } else {
+      break;
+    }
+    int id = ff_module_to_field(m.type);
+    int si = field_count;
+    if (id == F_CUSTOM_MARKER) {
+      strncpy(seq_custom_format[si], m.format, sizeof(seq_custom_format[si]) - 1);
+      seq_custom_format[si][sizeof(seq_custom_format[si]) - 1] = '\0';
+      if (m.outputColor[0])
+        ff_color_to_ansi(m.outputColor, seq_custom_color[si],
+                         (int)sizeof(seq_custom_color[si]));
+      else
+        seq_custom_color[si][0] = '\0';
+      field_order[field_count++] = F_CUSTOM_MARKER;
+    } else if (id >= 0) {
+      field_order[field_count++] = id;
+      if (id < F_COUNT) field_enabled[id] = 1;
+      if (m.key[0]) {
+        strncpy(seq_label_override[si], m.key,
+                sizeof(seq_label_override[si]) - 1);
+        seq_label_override[si][sizeof(seq_label_override[si]) - 1] = '\0';
+      }
+      if (m.keyColor[0]) {
+        ff_color_to_ansi(m.keyColor, seq_color_override[si],
+                         (int)sizeof(seq_color_override[si]));
+      }
+      if (m.format[0]) {
+        strncpy(seq_format[si], m.format, sizeof(seq_format[si]) - 1);
+        seq_format[si][sizeof(seq_format[si]) - 1] = '\0';
+      }
+    }
+    p = ff_skip_ws(p);
+    if (*p == ',') { p++; p = ff_skip_ws(p); }
+  }
+
+  free(buf);
+  ff_mode_active = 1;
+  return 1;
+}
+
+static int resolve_and_load_fastfetch(const char *explicit_path) {
+  char tmp[512];
+  if (explicit_path && explicit_path[0]) {
+    return load_fastfetch_config(explicit_path);
+  }
+  const char *xdg = getenv("XDG_CONFIG_HOME");
+  if (xdg && *xdg) {
+    snprintf(tmp, sizeof(tmp), "%s/fastfetch/config.jsonc", xdg);
+    if (access(tmp, R_OK) == 0) return load_fastfetch_config(tmp);
+  }
+  const char *home = getenv("HOME");
+  if (home && *home) {
+    snprintf(tmp, sizeof(tmp), "%s/.config/fastfetch/config.jsonc", home);
+    if (access(tmp, R_OK) == 0) return load_fastfetch_config(tmp);
+    snprintf(tmp, sizeof(tmp), "%s/.config/fastfetch/config.conf", home);
+    if (access(tmp, R_OK) == 0) return load_fastfetch_config(tmp);
+  }
+  fprintf(stderr, "fetch: no fastfetch config found in XDG/HOME\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   char distro[64] = "";
   const char *logo_name = NULL;
@@ -1851,6 +2803,8 @@ int main(int argc, char **argv) {
   int use_color = 1;
   int max_frames = 2000;
   const char *shading = ".,-~:;=!*#$@";
+  int ff_requested = 0; // 1 = enable, -1 = force off, 0 = use config
+  char ff_cli_path[512] = "";
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -1872,12 +2826,29 @@ int main(int argc, char **argv) {
              "  --shading-chars <str>     Custom shading ramp, supports UTF-8\n"
              "                            Default: .,-~:;=!*#$@\n"
              "                            Example: ' ░▒▓█'\n"
+             "  --ff-config [path]        Use fastfetch's config for the info\n"
+             "                            layout (module order, key labels,\n"
+             "                            keyColor). If no path given, looks up\n"
+             "                            $XDG_CONFIG_HOME/fastfetch/config.jsonc\n"
+             "                            and ~/.config/fastfetch/config.jsonc.\n"
+             "                            Also accepts --ff-config=<path>.\n"
+             "                            Note: fastfetch's logo/display blocks\n"
+             "                            are IGNORED; fetch's 3D spinning logo\n"
+             "                            always wins. Only the `modules` array\n"
+             "                            is consulted, and only type/key/keyColor\n"
+             "                            per module.\n"
+             "  --no-ff-config            Force-disable fastfetch config (even if\n"
+             "                            enabled via fetch's own config file)\n"
              "  -h, --help                Show this help\n\n"
              "Config: ~/.config/fetch/logo.txt\n"
              "  Add '# distro: <name>' as the first line to set colors.\n"
              "  Supported color schemes:\n"
              "    gentoo, arch, ubuntu, debian, fedora, fedora-asahi-remix,\n"
-             "    nixos, void, alpine, opensuse\n");
+             "    nixos, void, alpine, opensuse\n\n"
+             "Config: ~/.config/fetch/config\n"
+             "  fastfetch_config=auto     Use auto-discovered fastfetch config\n"
+             "  fastfetch_config=<path>   Use explicit path\n"
+             "  fastfetch_config=off      Disable (default)\n");
       return 0;
     } else if ((strcmp(argv[i], "--logo") == 0 || strcmp(argv[i], "-l") == 0) &&
         i + 1 < argc) {
@@ -1911,6 +2882,18 @@ int main(int argc, char **argv) {
         size_scale = 0.5f;
       if (size_scale > 5.0f)
         size_scale = 5.0f;
+    } else if (strcmp(argv[i], "--ff-config") == 0) {
+      ff_requested = 1;
+      if (i + 1 < argc && argv[i + 1][0] != '-') {
+        strncpy(ff_cli_path, argv[++i], sizeof(ff_cli_path) - 1);
+        ff_cli_path[sizeof(ff_cli_path) - 1] = '\0';
+      }
+    } else if (strncmp(argv[i], "--ff-config=", 12) == 0) {
+      ff_requested = 1;
+      strncpy(ff_cli_path, argv[i] + 12, sizeof(ff_cli_path) - 1);
+      ff_cli_path[sizeof(ff_cli_path) - 1] = '\0';
+    } else if (strcmp(argv[i], "--no-ff-config") == 0) {
+      ff_requested = -1;
     }
   }
 
@@ -1918,6 +2901,26 @@ int main(int argc, char **argv) {
   parse_shading(shading);
   config_defaults();
   load_config();
+
+  // Decide whether to activate fastfetch config mode.
+  // CLI flags (--ff-config / --no-ff-config) take priority over fetch's
+  // own config directive (fastfetch_config=...). Default is off.
+  {
+    int ff_on = 0;
+    const char *ff_path = NULL;
+    if (ff_requested == -1) {
+      ff_on = 0;
+    } else if (ff_requested == 1) {
+      ff_on = 1;
+      if (ff_cli_path[0]) ff_path = ff_cli_path;
+    } else if (config_ff_setting[0] && strcasecmp(config_ff_setting, "off") != 0) {
+      ff_on = 1;
+      if (strcasecmp(config_ff_setting, "auto") != 0)
+        ff_path = config_ff_setting;
+    }
+    if (ff_on)
+      resolve_and_load_fastfetch(ff_path);
+  }
 
   // Config overrides for shading, speed, spin (CLI flags take priority)
   if (config_shading[0])
@@ -1979,8 +2982,11 @@ int main(int argc, char **argv) {
   // Process logo into codepoint cells
   process_logo();
 
-  if (distro[0])
+  if (distro[0]) {
     set_distro_colors(distro);
+    strncpy(detected_distro, distro, sizeof(detected_distro) - 1);
+    detected_distro[sizeof(detected_distro) - 1] = '\0';
+  }
 
   typedef void (*gather_fn)(void);
   gather_fn fns[F_COUNT] = {
@@ -2005,27 +3011,58 @@ int main(int argc, char **argv) {
       [F_BATTERY] = gather_battery,
       [F_LOCALE] = gather_locale,
       [F_COLORS] = NULL,
+      [F_DE] = gather_de,
+      [F_LM] = gather_lm,
+      [F_BRIGHTNESS] = gather_brightness,
+      [F_POWERADAPTER] = gather_poweradapter,
+      [F_SOUND] = gather_sound,
+      [F_BLUETOOTH] = gather_bluetooth,
+      [F_WIFI] = gather_wifi,
+      [F_PLAYER] = gather_player,
+      [F_MEDIA] = gather_media,
   };
 
   for (int i = 0; i < F_COUNT; i++)
     field_line[i] = -1;
 
+  for (int i = 0; i < F_COUNT; i++) field_seq_idx[i] = -1;
+
   if (show_info) {
-    gather_title();
+    if (!ff_mode_active) {
+      current_field = F_TITLE;
+      current_seq_idx = -1;
+      gather_title_line();
+      current_field = F_SEPARATOR;
+      gather_separator_line();
+      current_field = -1;
+    }
     for (int i = 0; i < field_count; i++) {
       int id = field_order[i];
-      if (id == F_COLORS) {
+      current_seq_idx = i;
+      if (id == F_CUSTOM_MARKER) {
+        ff_render_custom(seq_custom_format[i], seq_custom_color[i]);
+      } else if (id == F_TITLE) {
+        current_field = F_TITLE;
+        gather_title_line();
+      } else if (id == F_SEPARATOR) {
+        current_field = F_SEPARATOR;
+        gather_separator_line();
+      } else if (id == F_BREAK) {
+        add_line("");
+      } else if (id == F_COLORS) {
         add_line("");
         add_line("\033[40m   \033[41m   \033[42m   \033[43m   "
                  "\033[44m   \033[45m   \033[46m   \033[47m   \033[0m");
         add_line("\033[100m   \033[101m   \033[102m   \033[103m   "
                  "\033[104m   \033[105m   \033[106m   \033[107m   \033[0m");
-      } else if (fns[id]) {
+      } else if (id >= 0 && id < F_COUNT && fns[id]) {
         current_field = id;
+        if (field_seq_idx[id] < 0) field_seq_idx[id] = i;
         fns[id]();
       }
     }
     current_field = -1;
+    current_seq_idx = -1;
   }
   // Set render height: config/flag override > auto-fit to info lines > default
   if (config_height > 0) {
@@ -2080,17 +3117,21 @@ int main(int argc, char **argv) {
       is_refresh_pass = 1;
       if (field_line[F_UPTIME] >= 0) {
         current_field = F_UPTIME;
+        current_seq_idx = field_seq_idx[F_UPTIME];
         gather_uptime();
       }
       if (field_line[F_MEMORY] >= 0) {
         current_field = F_MEMORY;
+        current_seq_idx = field_seq_idx[F_MEMORY];
         gather_memory();
       }
       if (field_line[F_SWAP] >= 0) {
         current_field = F_SWAP;
+        current_seq_idx = field_seq_idx[F_SWAP];
         gather_swap();
       }
       current_field = -1;
+      current_seq_idx = -1;
       is_refresh_pass = 0;
     }
 
