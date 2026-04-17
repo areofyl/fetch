@@ -976,9 +976,31 @@ static void gather_wm(void) {
   int is_wayland = (wayland && wayland[0]) ||
                    (session && strcmp(session, "wayland") == 0);
 
-  // Try to figure out the WM name
+  // Try to figure out the WM name. $XDG_CURRENT_DESKTOP is the DE, not the
+  // WM, so map the common DEs to their WM. If we don't know, fall back to
+  // the DE string (old behaviour).
   char wm[64] = "";
+  const char *mapped = NULL;
   if (desktop && desktop[0]) {
+    char first[32];
+    int n = 0;
+    while (desktop[n] && desktop[n] != ':' && n < (int)sizeof(first) - 1) {
+      first[n] = desktop[n];
+      n++;
+    }
+    first[n] = '\0';
+    if (strcasecmp(first, "KDE") == 0) mapped = "KWin";
+    else if (strcasecmp(first, "GNOME") == 0) mapped = "Mutter";
+    else if (strcasecmp(first, "XFCE") == 0) mapped = "xfwm4";
+    else if (strcasecmp(first, "Cinnamon") == 0) mapped = "Muffin";
+    else if (strcasecmp(first, "MATE") == 0) mapped = "Marco";
+    else if (strcasecmp(first, "LXQt") == 0) mapped = "Openbox";
+    else if (strcasecmp(first, "Budgie") == 0) mapped = "Mutter";
+    else if (strcasecmp(first, "Deepin") == 0) mapped = "KWin";
+  }
+  if (mapped) {
+    strncpy(wm, mapped, sizeof(wm) - 1);
+  } else if (desktop && desktop[0]) {
     strncpy(wm, desktop, sizeof(wm) - 1);
   } else {
     // Try common WM env vars / process detection
