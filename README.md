@@ -59,8 +59,7 @@ You also need to import the nix package in your ```home.nix```. Check ```nix/hom
 }
 ```
 
-#### Bugs
-* Because fastfetch is wrapped the ```terminal``` field will print: ".fetch-wrapped" on a kitty terminal.
+#### Issues
 * GPU will not print full name, just generic "AMD GPU".
 
 ## Logos
