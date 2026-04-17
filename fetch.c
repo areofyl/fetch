@@ -1352,7 +1352,7 @@ static void gather_terminal(void) {
   if (tp && tp[0]) {
     strncpy(term, tp, sizeof(term) - 1);
   } else if (getenv("KITTY_WINDOW_ID")) {
-        strcpy(term, "kitty");
+    strcpy(term, "kitty");
   } else {
     // Get parent process name (the terminal)
     FILE *fp = popen("ps -o comm= -p $(ps -o ppid= -p $$) 2>/dev/null", "r");
