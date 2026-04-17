@@ -913,21 +913,59 @@ static void gather_shell(void) {
 }
 
 static void gather_display(void) {
-  char res[64] = "";
-  // Try DRM modes
-  FILE *fp = popen("cat /sys/class/drm/card*/modes 2>/dev/null", "r");
-  if (fp) {
-    char buf[64];
+  DIR *d = opendir("/sys/class/drm");
+  if (!d) return;
+  struct dirent *ent;
+  int emitted = 0;
+  while ((ent = readdir(d))) {
+    // Pattern: cardN-CONNECTOR (skip bare cardN and renderD*)
+    if (strncmp(ent->d_name, "card", 4) != 0) continue;
+    const char *dash = strchr(ent->d_name + 4, '-');
+    if (!dash) continue;
+
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/status", ent->d_name);
+    FILE *fp = fopen(path, "r");
+    if (!fp) continue;
+    char status[32] = "";
+    if (fgets(status, sizeof(status), fp)) {
+      int l = strlen(status);
+      while (l > 0 && (status[l - 1] == '\n' || status[l - 1] == '\r'))
+        status[--l] = '\0';
+    }
+    fclose(fp);
+    if (strcmp(status, "connected") != 0) continue;
+
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/modes", ent->d_name);
+    fp = fopen(path, "r");
+    if (!fp) continue;
+    char mode[32] = "";
+    if (fgets(mode, sizeof(mode), fp)) {
+      int l = strlen(mode);
+      while (l > 0 && (mode[l - 1] == '\n' || mode[l - 1] == '\r'))
+        mode[--l] = '\0';
+    }
+    fclose(fp);
+    if (!mode[0]) continue;
+
+    add_info("Display", "%s @ %s", dash + 1, mode);
+    emitted++;
+  }
+  closedir(d);
+
+  // Fallback for drivers that don't expose per-connector modes.
+  if (!emitted) {
+    FILE *fp = popen("cat /sys/class/drm/card*/modes 2>/dev/null", "r");
+    if (!fp) return;
+    char buf[64] = "";
     if (fgets(buf, sizeof(buf), fp)) {
-      int len = strlen(buf);
-      while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-        buf[--len] = '\0';
-      strncpy(res, buf, sizeof(res) - 1);
+      int l = strlen(buf);
+      while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r'))
+        buf[--l] = '\0';
+      if (buf[0]) add_info("Display", "%s", buf);
     }
     pclose(fp);
   }
-  if (res[0])
-    add_info("Display", "%s", res);
 }
 
 static void gather_wm(void) {
