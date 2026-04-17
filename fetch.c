@@ -1058,60 +1058,139 @@ static void gather_cpu(void) {
   }
 }
 
-static void gather_gpu(void) {
-  char name[128] = "";
+// Extract the human product name from `lspci -d VVVV:DDDD` output.
+// Example input: "01:00.0 VGA compatible controller: NVIDIA Corporation
+// AD106M [GeForce RTX 4070 Max-Q / Mobile] (rev a1)"
+// We prefer the bracket content; otherwise the chunk after "Corporation ".
+static int gpu_lookup_lspci(const char *pci_id, char *out, int outlen) {
+  if (!pci_id || !pci_id[0]) return 0;
+  char cmd[128];
+  snprintf(cmd, sizeof(cmd), "lspci -d %s 2>/dev/null", pci_id);
+  FILE *fp = popen(cmd, "r");
+  if (!fp) return 0;
+  char line[256];
+  int ok = 0;
+  if (fgets(line, sizeof(line), fp)) {
+    int l = strlen(line);
+    while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
+      line[--l] = '\0';
+    char *rev = strstr(line, " (rev ");
+    if (rev) *rev = '\0';
+    char *lb = strrchr(line, '[');
+    char *rb = strrchr(line, ']');
+    const char *name = NULL;
+    if (lb && rb && rb > lb) {
+      *rb = '\0';
+      name = lb + 1;
+    } else {
+      char *corp = strstr(line, " Corporation ");
+      int skip = corp ? 13 : 0;
+      if (!corp) { corp = strstr(line, " Corp "); if (corp) skip = 6; }
+      // Skip past "bus:dev.fn class:" prefix even if no Corporation.
+      if (!corp) {
+        char *c1 = strchr(line, ':');
+        if (c1) {
+          char *c2 = strchr(c1 + 1, ':');
+          if (c2) { corp = c2; skip = 1; }
+        }
+      }
+      name = corp ? (corp + skip) : line;
+      while (*name == ' ') name++;
+    }
+    if (name && *name) {
+      strncpy(out, name, outlen - 1);
+      out[outlen - 1] = '\0';
+      ok = 1;
+    }
+  }
+  pclose(fp);
+  return ok;
+}
 
-  // Try DRM device-tree compatible (ARM/Apple Silicon)
-  FILE *fp =
-      popen("cat /sys/class/drm/card*/device/uevent 2>/dev/null", "r");
-  if (fp) {
+static void gather_gpu(void) {
+  DIR *d = opendir("/sys/class/drm");
+  if (!d) return;
+  struct dirent *ent;
+  while ((ent = readdir(d))) {
+    // Only cardN (not cardN-CONNECTOR or renderD*)
+    if (strncmp(ent->d_name, "card", 4) != 0) continue;
+    int all_digits = 1;
+    for (int i = 4; ent->d_name[i]; i++) {
+      if (ent->d_name[i] < '0' || ent->d_name[i] > '9') { all_digits = 0; break; }
+    }
+    if (!all_digits) continue;
+
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/device/uevent", ent->d_name);
+    FILE *fp = fopen(path, "r");
+    if (!fp) continue;
+    char driver[32] = "", pci_id[16] = "", compat[64] = "";
     char buf[256];
     while (fgets(buf, sizeof(buf), fp)) {
-      if (strncmp(buf, "OF_COMPATIBLE_0=apple,agx", 24) == 0) {
-        // Apple GPU — name matches the CPU chip
-        char cpu[64] = "";
-        FILE *mfp = fopen("/proc/device-tree/model", "r");
-        if (mfp) {
-          char model[128];
-          if (fgets(model, sizeof(model), mfp)) {
-            char *paren = strchr(model, '(');
-            if (paren) {
-              paren++;
-              char *comma = strchr(paren, ',');
-              char *end = comma ? comma : strchr(paren, ')');
-              if (end)
-                snprintf(cpu, sizeof(cpu), "%.*s", (int)(end - paren), paren);
-            }
-          }
-          fclose(mfp);
-        }
-        if (cpu[0])
-          snprintf(name, sizeof(name), "Apple %s [Integrated]", cpu);
-        else
-          strcpy(name, "Apple GPU [Integrated]");
-        break;
-      }
-      // x86: try PCI-based detection
       if (strncmp(buf, "DRIVER=", 7) == 0) {
-        char *drv = buf + 7;
-        int len = strlen(drv);
-        while (len > 0 && (drv[len - 1] == '\n' || drv[len - 1] == '\r'))
-          drv[--len] = '\0';
-        if (strcmp(drv, "i915") == 0 || strcmp(drv, "xe") == 0)
-          strcpy(name, "Intel GPU [Integrated]");
-        else if (strcmp(drv, "amdgpu") == 0 || strcmp(drv, "radeon") == 0)
-          strcpy(name, "AMD GPU");
-        else if (strcmp(drv, "nvidia") == 0 || strcmp(drv, "nouveau") == 0)
-          strcpy(name, "NVIDIA GPU");
-        if (name[0])
-          break;
+        char *v = buf + 7;
+        int l = strlen(v);
+        while (l > 0 && (v[l - 1] == '\n' || v[l - 1] == '\r')) v[--l] = '\0';
+        strncpy(driver, v, sizeof(driver) - 1);
+      } else if (strncmp(buf, "PCI_ID=", 7) == 0) {
+        char *v = buf + 7;
+        int l = strlen(v);
+        while (l > 0 && (v[l - 1] == '\n' || v[l - 1] == '\r')) v[--l] = '\0';
+        strncpy(pci_id, v, sizeof(pci_id) - 1);
+      } else if (strncmp(buf, "OF_COMPATIBLE_0=", 16) == 0) {
+        char *v = buf + 16;
+        int l = strlen(v);
+        while (l > 0 && (v[l - 1] == '\n' || v[l - 1] == '\r')) v[--l] = '\0';
+        strncpy(compat, v, sizeof(compat) - 1);
       }
     }
-    pclose(fp);
-  }
+    fclose(fp);
 
-  if (name[0])
-    add_info("GPU", "%s", name);
+    char name[160] = "";
+    const char *type = "";
+
+    if (strncmp(compat, "apple,agx", 9) == 0) {
+      char cpu[64] = "";
+      FILE *mfp = fopen("/proc/device-tree/model", "r");
+      if (mfp) {
+        char model[128];
+        if (fgets(model, sizeof(model), mfp)) {
+          char *paren = strchr(model, '(');
+          if (paren) {
+            paren++;
+            char *comma = strchr(paren, ',');
+            char *end = comma ? comma : strchr(paren, ')');
+            if (end)
+              snprintf(cpu, sizeof(cpu), "%.*s", (int)(end - paren), paren);
+          }
+        }
+        fclose(mfp);
+      }
+      if (cpu[0]) snprintf(name, sizeof(name), "Apple %s", cpu);
+      else strcpy(name, "Apple GPU");
+      type = "Integrated";
+    } else if (pci_id[0] && gpu_lookup_lspci(pci_id, name, sizeof(name))) {
+      // lspci gave us a human name.
+    } else if (strcmp(driver, "i915") == 0 || strcmp(driver, "xe") == 0) {
+      strcpy(name, "Intel Graphics");
+    } else if (strcmp(driver, "amdgpu") == 0 || strcmp(driver, "radeon") == 0) {
+      strcpy(name, "AMD Graphics");
+    } else if (strcmp(driver, "nvidia") == 0 || strcmp(driver, "nouveau") == 0) {
+      strcpy(name, "NVIDIA GPU");
+    } else if (driver[0]) {
+      strncpy(name, driver, sizeof(name) - 1);
+    }
+
+    if (!type[0]) {
+      if (!strcmp(driver, "i915") || !strcmp(driver, "xe")) type = "Integrated";
+      else if (!strcmp(driver, "nvidia") || !strcmp(driver, "nouveau")) type = "Discrete";
+    }
+
+    if (!name[0]) continue;
+    if (type[0]) add_info("GPU", "%s [%s]", name, type);
+    else add_info("GPU", "%s", name);
+  }
+  closedir(d);
 }
 
 static void gather_memory(void) {
