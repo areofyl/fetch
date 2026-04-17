@@ -2,27 +2,23 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "fetch";
-  version = "1.0.0";
+  version = "1.0.0-unstable-18-04-1";
+
 
 # Uncomment to build locally
-# src = ../.;
+src = ../.;
 
-src = fetchFromGitHub {
-  owner = "areofyl";
-  repo = "fetch";
-  rev = "v${finalAttrs.version}";
-  hash = "sha256-rZr5ScxCr0L70LTpkntanDN46vjuqPGm2SMwqXewU0g=";
-};
+# Uncomment and change rev and hash when upstream fix for kitty has been pushed
+#src = fetchFromGitHub {
+#  owner = "areofyl";
+#  repo = "fetch";
+#  rev = "a056f655a57611cba4f1076cfa40dbf360da164f";
+#  hash = "sha256-508QYmyPSKZisABowgyaRV93ZrkTiS3ziKBCcs3WOpQ=";
+#};
+
 
   # Install in nix/store
   makeFlags = [ "PREFIX=${placeholder "out"}" ];
-
-  # Wrap fastfetch so it has the correct nix/store path
-  nativeBuildInputs = [ makeWrapper ];
-  postInstall = ''
-    wrapProgram $out/bin/fetch \
-      --prefix PATH : ${lib.makeBinPath [ fastfetch ]}
-  '';
 
   meta = {
     description = "Animated 3D fetch tool that renders your distro logo as a spinning bas-relief";
