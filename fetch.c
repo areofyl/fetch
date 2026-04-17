@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
@@ -500,6 +501,7 @@ static int field_order[F_COUNT];
 static int field_line[F_COUNT]; // line index for each field (-1 if not shown)
 static int current_field = -1;  // which field is currently being gathered
 static int field_count = 0;
+static int is_refresh_pass = 0; // 1 during the animation refresh tick
 static char label_color[16] = "35"; // default magenta
 static int config_height = 0;     // 0 = auto (match info lines)
 static float size_scale = 1.0f;
@@ -672,14 +674,15 @@ static void add_info(const char *label, const char *fmt, ...) {
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
            val);
 
-  // If this field already has a line, replace in place (refresh mode)
-  if (current_field >= 0 && field_line[current_field] >= 0) {
+  // Refresh tick: replace the field's line in place. Initial pass: always
+  // append a new line (so gathers that emit multiple rows, like multi-GPU,
+  // don't overwrite themselves).
+  if (is_refresh_pass && current_field >= 0 && field_line[current_field] >= 0) {
     int idx = field_line[current_field];
     strncpy(fetch_lines[idx], line, MAX_LINE_LEN - 1);
     fetch_lines[idx][MAX_LINE_LEN - 1] = '\0';
     return;
   }
-  // First time: record line index and append
   if (current_field >= 0)
     field_line[current_field] = fetch_line_count;
   add_line(line);
@@ -1935,6 +1938,7 @@ int main(int argc, char **argv) {
     // so they don't hitch the animation. Battery/disk/ip use popen and
     // stay static (user can restart to refresh those).
     if (show_info && frame > 0 && frame % 20 == 0) {
+      is_refresh_pass = 1;
       if (field_line[F_UPTIME] >= 0) {
         current_field = F_UPTIME;
         gather_uptime();
@@ -1948,6 +1952,7 @@ int main(int argc, char **argv) {
         gather_swap();
       }
       current_field = -1;
+      is_refresh_pass = 0;
     }
 
     clear_buf();
