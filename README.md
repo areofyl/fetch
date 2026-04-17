@@ -59,9 +59,6 @@ You also need to import the nix package in your ```home.nix```. Check ```nix/hom
 }
 ```
 
-#### Issues
-* GPU will not print full name, just generic "AMD GPU".
-
 ## Logos
 
 By default it auto-detects your distro and grabs the logo from fastfetch
