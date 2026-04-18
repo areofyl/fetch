@@ -167,6 +167,15 @@ colors
 
 CLI flags override config file settings.
 
+## Contributing
+
+PRs are welcome! If you want to add a feature, fix a bug, or package fetch for
+your distro, go for it. I try to keep the codebase small and easy to understand,
+so smaller PRs are easier to merge than big ones.
+
+If you want to chat about ideas before writing code, reach out on
+[Reddit](https://www.reddit.com/user/areofyl) or open an issue.
+
 ## How it works
 
 Each character in the logo gets a weight based on its visual density — `M` is
