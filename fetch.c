@@ -976,12 +976,39 @@ static void gather_wm(void) {
   int is_wayland = (wayland && wayland[0]) ||
                    (session && strcmp(session, "wayland") == 0);
 
-  // Try to figure out the WM name. $XDG_CURRENT_DESKTOP is the DE, not the
-  // WM, so map the common DEs to their WM. If we don't know, fall back to
-  // the DE string (old behaviour).
+  // Try to figure out the WM name. Process detection is most accurate
+  // (e.g. dwl sets XDG_CURRENT_DESKTOP=sway for compat), so try that first.
   char wm[64] = "";
-  const char *mapped = NULL;
-  if (desktop && desktop[0]) {
+
+  // 1. Check env vars for specific WMs
+  char *hyprland = getenv("HYPRLAND_INSTANCE_SIGNATURE");
+  if (hyprland)
+    strcpy(wm, "Hyprland");
+
+  // 2. Try process list for known WMs
+  if (!wm[0]) {
+    FILE *fp = popen("ps -e -o comm= 2>/dev/null", "r");
+    if (fp) {
+      char buf[64];
+      while (fgets(buf, sizeof(buf), fp)) {
+        int len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+          buf[--len] = '\0';
+        if (strcmp(buf, "dwl") == 0 || strcmp(buf, "sway") == 0 ||
+            strcmp(buf, "river") == 0 || strcmp(buf, "labwc") == 0 ||
+            strcmp(buf, "weston") == 0 || strcmp(buf, "i3") == 0 ||
+            strcmp(buf, "bspwm") == 0 || strcmp(buf, "openbox") == 0 ||
+            strcmp(buf, "awesome") == 0 || strcmp(buf, "dwm") == 0) {
+          strncpy(wm, buf, sizeof(wm) - 1);
+          break;
+        }
+      }
+      pclose(fp);
+    }
+  }
+
+  // 3. Fall back to DE-to-WM mapping from XDG_CURRENT_DESKTOP
+  if (!wm[0] && desktop && desktop[0]) {
     char first[32];
     int n = 0;
     while (desktop[n] && desktop[n] != ':' && n < (int)sizeof(first) - 1) {
@@ -989,48 +1016,15 @@ static void gather_wm(void) {
       n++;
     }
     first[n] = '\0';
-    if (strcasecmp(first, "KDE") == 0) mapped = "KWin";
-    else if (strcasecmp(first, "GNOME") == 0) mapped = "Mutter";
-    else if (strcasecmp(first, "XFCE") == 0) mapped = "xfwm4";
-    else if (strcasecmp(first, "Cinnamon") == 0) mapped = "Muffin";
-    else if (strcasecmp(first, "MATE") == 0) mapped = "Marco";
-    else if (strcasecmp(first, "LXQt") == 0) mapped = "Openbox";
-    else if (strcasecmp(first, "Budgie") == 0) mapped = "Mutter";
-    else if (strcasecmp(first, "Deepin") == 0) mapped = "KWin";
-  }
-  if (mapped) {
-    strncpy(wm, mapped, sizeof(wm) - 1);
-  } else if (desktop && desktop[0]) {
-    strncpy(wm, desktop, sizeof(wm) - 1);
-  } else {
-    // Try common WM env vars / process detection
-    char *swaysock = getenv("SWAYSOCK");
-    char *hyprland = getenv("HYPRLAND_INSTANCE_SIGNATURE");
-    if (swaysock)
-      strcpy(wm, "sway");
-    else if (hyprland)
-      strcpy(wm, "Hyprland");
-    else {
-      // Try process list for known WMs
-      FILE *fp = popen("ps -e -o comm= 2>/dev/null", "r");
-      if (fp) {
-        char buf[64];
-        while (fgets(buf, sizeof(buf), fp)) {
-          int len = strlen(buf);
-          while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-            buf[--len] = '\0';
-          if (strcmp(buf, "dwl") == 0 || strcmp(buf, "sway") == 0 ||
-              strcmp(buf, "river") == 0 || strcmp(buf, "labwc") == 0 ||
-              strcmp(buf, "weston") == 0 || strcmp(buf, "i3") == 0 ||
-              strcmp(buf, "bspwm") == 0 || strcmp(buf, "openbox") == 0 ||
-              strcmp(buf, "awesome") == 0 || strcmp(buf, "dwm") == 0) {
-            strncpy(wm, buf, sizeof(wm) - 1);
-            break;
-          }
-        }
-        pclose(fp);
-      }
-    }
+    if (strcasecmp(first, "KDE") == 0) strncpy(wm, "KWin", sizeof(wm) - 1);
+    else if (strcasecmp(first, "GNOME") == 0) strncpy(wm, "Mutter", sizeof(wm) - 1);
+    else if (strcasecmp(first, "XFCE") == 0) strncpy(wm, "xfwm4", sizeof(wm) - 1);
+    else if (strcasecmp(first, "Cinnamon") == 0) strncpy(wm, "Muffin", sizeof(wm) - 1);
+    else if (strcasecmp(first, "MATE") == 0) strncpy(wm, "Marco", sizeof(wm) - 1);
+    else if (strcasecmp(first, "LXQt") == 0) strncpy(wm, "Openbox", sizeof(wm) - 1);
+    else if (strcasecmp(first, "Budgie") == 0) strncpy(wm, "Mutter", sizeof(wm) - 1);
+    else if (strcasecmp(first, "Deepin") == 0) strncpy(wm, "KWin", sizeof(wm) - 1);
+    else strncpy(wm, desktop, sizeof(wm) - 1);
   }
 
   if (wm[0])
@@ -1208,6 +1202,10 @@ static void gather_gpu(void) {
 
     char name[160] = "";
     const char *type = "";
+
+    // Skip display subsystems — they're not GPUs
+    if (strstr(compat, "display-subsystem"))
+      continue;
 
     if (strncmp(compat, "apple,agx", 9) == 0) {
       char cpu[64] = "";
