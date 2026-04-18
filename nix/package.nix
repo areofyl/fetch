@@ -1,4 +1,4 @@
-{ lib, stdenv, fetchFromGitHub, fastfetch, makeWrapper }:
+{ lib, stdenv, fetchFromGitHub, fastfetch, pciutils, makeWrapper }:
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "fetch";
@@ -23,7 +23,7 @@ stdenv.mkDerivation (finalAttrs: {
   nativeBuildInputs = [ makeWrapper ];
   postInstall = ''
     wrapProgram $out/bin/fetch \
-    --prefix PATH : ${lib.makeBinPath [ fastfetch ]}
+    --prefix PATH : ${lib.makeBinPath [ fastfetch pciutils ]}
   '';
 
   meta = {
