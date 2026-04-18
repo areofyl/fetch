@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
@@ -500,6 +501,7 @@ static int field_order[F_COUNT];
 static int field_line[F_COUNT]; // line index for each field (-1 if not shown)
 static int current_field = -1;  // which field is currently being gathered
 static int field_count = 0;
+static int is_refresh_pass = 0; // 1 during the animation refresh tick
 static char label_color[16] = "35"; // default magenta
 static int config_height = 0;     // 0 = auto (match info lines)
 static float size_scale = 1.0f;
@@ -672,14 +674,15 @@ static void add_info(const char *label, const char *fmt, ...) {
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
            val);
 
-  // If this field already has a line, replace in place (refresh mode)
-  if (current_field >= 0 && field_line[current_field] >= 0) {
+  // Refresh tick: replace the field's line in place. Initial pass: always
+  // append a new line (so gathers that emit multiple rows, like multi-GPU,
+  // don't overwrite themselves).
+  if (is_refresh_pass && current_field >= 0 && field_line[current_field] >= 0) {
     int idx = field_line[current_field];
     strncpy(fetch_lines[idx], line, MAX_LINE_LEN - 1);
     fetch_lines[idx][MAX_LINE_LEN - 1] = '\0';
     return;
   }
-  // First time: record line index and append
   if (current_field >= 0)
     field_line[current_field] = fetch_line_count;
   add_line(line);
@@ -910,21 +913,59 @@ static void gather_shell(void) {
 }
 
 static void gather_display(void) {
-  char res[64] = "";
-  // Try DRM modes
-  FILE *fp = popen("cat /sys/class/drm/card*/modes 2>/dev/null", "r");
-  if (fp) {
-    char buf[64];
+  DIR *d = opendir("/sys/class/drm");
+  if (!d) return;
+  struct dirent *ent;
+  int emitted = 0;
+  while ((ent = readdir(d))) {
+    // Pattern: cardN-CONNECTOR (skip bare cardN and renderD*)
+    if (strncmp(ent->d_name, "card", 4) != 0) continue;
+    const char *dash = strchr(ent->d_name + 4, '-');
+    if (!dash) continue;
+
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/status", ent->d_name);
+    FILE *fp = fopen(path, "r");
+    if (!fp) continue;
+    char status[32] = "";
+    if (fgets(status, sizeof(status), fp)) {
+      int l = strlen(status);
+      while (l > 0 && (status[l - 1] == '\n' || status[l - 1] == '\r'))
+        status[--l] = '\0';
+    }
+    fclose(fp);
+    if (strcmp(status, "connected") != 0) continue;
+
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/modes", ent->d_name);
+    fp = fopen(path, "r");
+    if (!fp) continue;
+    char mode[32] = "";
+    if (fgets(mode, sizeof(mode), fp)) {
+      int l = strlen(mode);
+      while (l > 0 && (mode[l - 1] == '\n' || mode[l - 1] == '\r'))
+        mode[--l] = '\0';
+    }
+    fclose(fp);
+    if (!mode[0]) continue;
+
+    add_info("Display", "%s @ %s", dash + 1, mode);
+    emitted++;
+  }
+  closedir(d);
+
+  // Fallback for drivers that don't expose per-connector modes.
+  if (!emitted) {
+    FILE *fp = popen("cat /sys/class/drm/card*/modes 2>/dev/null", "r");
+    if (!fp) return;
+    char buf[64] = "";
     if (fgets(buf, sizeof(buf), fp)) {
-      int len = strlen(buf);
-      while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-        buf[--len] = '\0';
-      strncpy(res, buf, sizeof(res) - 1);
+      int l = strlen(buf);
+      while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r'))
+        buf[--l] = '\0';
+      if (buf[0]) add_info("Display", "%s", buf);
     }
     pclose(fp);
   }
-  if (res[0])
-    add_info("Display", "%s", res);
 }
 
 static void gather_wm(void) {
@@ -935,9 +976,31 @@ static void gather_wm(void) {
   int is_wayland = (wayland && wayland[0]) ||
                    (session && strcmp(session, "wayland") == 0);
 
-  // Try to figure out the WM name
+  // Try to figure out the WM name. $XDG_CURRENT_DESKTOP is the DE, not the
+  // WM, so map the common DEs to their WM. If we don't know, fall back to
+  // the DE string (old behaviour).
   char wm[64] = "";
+  const char *mapped = NULL;
   if (desktop && desktop[0]) {
+    char first[32];
+    int n = 0;
+    while (desktop[n] && desktop[n] != ':' && n < (int)sizeof(first) - 1) {
+      first[n] = desktop[n];
+      n++;
+    }
+    first[n] = '\0';
+    if (strcasecmp(first, "KDE") == 0) mapped = "KWin";
+    else if (strcasecmp(first, "GNOME") == 0) mapped = "Mutter";
+    else if (strcasecmp(first, "XFCE") == 0) mapped = "xfwm4";
+    else if (strcasecmp(first, "Cinnamon") == 0) mapped = "Muffin";
+    else if (strcasecmp(first, "MATE") == 0) mapped = "Marco";
+    else if (strcasecmp(first, "LXQt") == 0) mapped = "Openbox";
+    else if (strcasecmp(first, "Budgie") == 0) mapped = "Mutter";
+    else if (strcasecmp(first, "Deepin") == 0) mapped = "KWin";
+  }
+  if (mapped) {
+    strncpy(wm, mapped, sizeof(wm) - 1);
+  } else if (desktop && desktop[0]) {
     strncpy(wm, desktop, sizeof(wm) - 1);
   } else {
     // Try common WM env vars / process detection
@@ -1055,60 +1118,139 @@ static void gather_cpu(void) {
   }
 }
 
-static void gather_gpu(void) {
-  char name[128] = "";
+// Extract the human product name from `lspci -d VVVV:DDDD` output.
+// Example input: "01:00.0 VGA compatible controller: NVIDIA Corporation
+// AD106M [GeForce RTX 4070 Max-Q / Mobile] (rev a1)"
+// We prefer the bracket content; otherwise the chunk after "Corporation ".
+static int gpu_lookup_lspci(const char *pci_id, char *out, int outlen) {
+  if (!pci_id || !pci_id[0]) return 0;
+  char cmd[128];
+  snprintf(cmd, sizeof(cmd), "lspci -d %s 2>/dev/null", pci_id);
+  FILE *fp = popen(cmd, "r");
+  if (!fp) return 0;
+  char line[256];
+  int ok = 0;
+  if (fgets(line, sizeof(line), fp)) {
+    int l = strlen(line);
+    while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
+      line[--l] = '\0';
+    char *rev = strstr(line, " (rev ");
+    if (rev) *rev = '\0';
+    char *lb = strrchr(line, '[');
+    char *rb = strrchr(line, ']');
+    const char *name = NULL;
+    if (lb && rb && rb > lb) {
+      *rb = '\0';
+      name = lb + 1;
+    } else {
+      char *corp = strstr(line, " Corporation ");
+      int skip = corp ? 13 : 0;
+      if (!corp) { corp = strstr(line, " Corp "); if (corp) skip = 6; }
+      // Skip past "bus:dev.fn class:" prefix even if no Corporation.
+      if (!corp) {
+        char *c1 = strchr(line, ':');
+        if (c1) {
+          char *c2 = strchr(c1 + 1, ':');
+          if (c2) { corp = c2; skip = 1; }
+        }
+      }
+      name = corp ? (corp + skip) : line;
+      while (*name == ' ') name++;
+    }
+    if (name && *name) {
+      strncpy(out, name, outlen - 1);
+      out[outlen - 1] = '\0';
+      ok = 1;
+    }
+  }
+  pclose(fp);
+  return ok;
+}
 
-  // Try DRM device-tree compatible (ARM/Apple Silicon)
-  FILE *fp =
-      popen("cat /sys/class/drm/card*/device/uevent 2>/dev/null", "r");
-  if (fp) {
+static void gather_gpu(void) {
+  DIR *d = opendir("/sys/class/drm");
+  if (!d) return;
+  struct dirent *ent;
+  while ((ent = readdir(d))) {
+    // Only cardN (not cardN-CONNECTOR or renderD*)
+    if (strncmp(ent->d_name, "card", 4) != 0) continue;
+    int all_digits = 1;
+    for (int i = 4; ent->d_name[i]; i++) {
+      if (ent->d_name[i] < '0' || ent->d_name[i] > '9') { all_digits = 0; break; }
+    }
+    if (!all_digits) continue;
+
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/device/uevent", ent->d_name);
+    FILE *fp = fopen(path, "r");
+    if (!fp) continue;
+    char driver[32] = "", pci_id[16] = "", compat[64] = "";
     char buf[256];
     while (fgets(buf, sizeof(buf), fp)) {
-      if (strncmp(buf, "OF_COMPATIBLE_0=apple,agx", 24) == 0) {
-        // Apple GPU — name matches the CPU chip
-        char cpu[64] = "";
-        FILE *mfp = fopen("/proc/device-tree/model", "r");
-        if (mfp) {
-          char model[128];
-          if (fgets(model, sizeof(model), mfp)) {
-            char *paren = strchr(model, '(');
-            if (paren) {
-              paren++;
-              char *comma = strchr(paren, ',');
-              char *end = comma ? comma : strchr(paren, ')');
-              if (end)
-                snprintf(cpu, sizeof(cpu), "%.*s", (int)(end - paren), paren);
-            }
-          }
-          fclose(mfp);
-        }
-        if (cpu[0])
-          snprintf(name, sizeof(name), "Apple %s [Integrated]", cpu);
-        else
-          strcpy(name, "Apple GPU [Integrated]");
-        break;
-      }
-      // x86: try PCI-based detection
       if (strncmp(buf, "DRIVER=", 7) == 0) {
-        char *drv = buf + 7;
-        int len = strlen(drv);
-        while (len > 0 && (drv[len - 1] == '\n' || drv[len - 1] == '\r'))
-          drv[--len] = '\0';
-        if (strcmp(drv, "i915") == 0 || strcmp(drv, "xe") == 0)
-          strcpy(name, "Intel GPU [Integrated]");
-        else if (strcmp(drv, "amdgpu") == 0 || strcmp(drv, "radeon") == 0)
-          strcpy(name, "AMD GPU");
-        else if (strcmp(drv, "nvidia") == 0 || strcmp(drv, "nouveau") == 0)
-          strcpy(name, "NVIDIA GPU");
-        if (name[0])
-          break;
+        char *v = buf + 7;
+        int l = strlen(v);
+        while (l > 0 && (v[l - 1] == '\n' || v[l - 1] == '\r')) v[--l] = '\0';
+        strncpy(driver, v, sizeof(driver) - 1);
+      } else if (strncmp(buf, "PCI_ID=", 7) == 0) {
+        char *v = buf + 7;
+        int l = strlen(v);
+        while (l > 0 && (v[l - 1] == '\n' || v[l - 1] == '\r')) v[--l] = '\0';
+        strncpy(pci_id, v, sizeof(pci_id) - 1);
+      } else if (strncmp(buf, "OF_COMPATIBLE_0=", 16) == 0) {
+        char *v = buf + 16;
+        int l = strlen(v);
+        while (l > 0 && (v[l - 1] == '\n' || v[l - 1] == '\r')) v[--l] = '\0';
+        strncpy(compat, v, sizeof(compat) - 1);
       }
     }
-    pclose(fp);
-  }
+    fclose(fp);
 
-  if (name[0])
-    add_info("GPU", "%s", name);
+    char name[160] = "";
+    const char *type = "";
+
+    if (strncmp(compat, "apple,agx", 9) == 0) {
+      char cpu[64] = "";
+      FILE *mfp = fopen("/proc/device-tree/model", "r");
+      if (mfp) {
+        char model[128];
+        if (fgets(model, sizeof(model), mfp)) {
+          char *paren = strchr(model, '(');
+          if (paren) {
+            paren++;
+            char *comma = strchr(paren, ',');
+            char *end = comma ? comma : strchr(paren, ')');
+            if (end)
+              snprintf(cpu, sizeof(cpu), "%.*s", (int)(end - paren), paren);
+          }
+        }
+        fclose(mfp);
+      }
+      if (cpu[0]) snprintf(name, sizeof(name), "Apple %s", cpu);
+      else strcpy(name, "Apple GPU");
+      type = "Integrated";
+    } else if (pci_id[0] && gpu_lookup_lspci(pci_id, name, sizeof(name))) {
+      // lspci gave us a human name.
+    } else if (strcmp(driver, "i915") == 0 || strcmp(driver, "xe") == 0) {
+      strcpy(name, "Intel Graphics");
+    } else if (strcmp(driver, "amdgpu") == 0 || strcmp(driver, "radeon") == 0) {
+      strcpy(name, "AMD Graphics");
+    } else if (strcmp(driver, "nvidia") == 0 || strcmp(driver, "nouveau") == 0) {
+      strcpy(name, "NVIDIA GPU");
+    } else if (driver[0]) {
+      strncpy(name, driver, sizeof(name) - 1);
+    }
+
+    if (!type[0]) {
+      if (!strcmp(driver, "i915") || !strcmp(driver, "xe")) type = "Integrated";
+      else if (!strcmp(driver, "nvidia") || !strcmp(driver, "nouveau")) type = "Discrete";
+    }
+
+    if (!name[0]) continue;
+    if (type[0]) add_info("GPU", "%s [%s]", name, type);
+    else add_info("GPU", "%s", name);
+  }
+  closedir(d);
 }
 
 static void gather_memory(void) {
@@ -1935,6 +2077,7 @@ int main(int argc, char **argv) {
     // so they don't hitch the animation. Battery/disk/ip use popen and
     // stay static (user can restart to refresh those).
     if (show_info && frame > 0 && frame % 20 == 0) {
+      is_refresh_pass = 1;
       if (field_line[F_UPTIME] >= 0) {
         current_field = F_UPTIME;
         gather_uptime();
@@ -1948,6 +2091,7 @@ int main(int argc, char **argv) {
         gather_swap();
       }
       current_field = -1;
+      is_refresh_pass = 0;
     }
 
     clear_buf();
