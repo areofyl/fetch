@@ -29,6 +29,17 @@ sudo make install
 
 `PREFIX=~/.local make install` if you don't want it system-wide.
 
+### Arch Linux (AUR)
+You can install `fetch-git` from the AUR using your favorite AUR helper:
+
+```bash
+yay -S fetch-git
+```
+or
+```bash
+paru -S fetch-git
+```
+
 ### Nix Flake
 Add this repo to your ```flake.nix```. The package is built using the unstable channel. You can overwrite this by setting ```inputs.nixpkgs.follows = "nixpkgs"``` (if your default is 25.11).
 
