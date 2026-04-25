@@ -50,6 +50,7 @@ areofyl-fetch.url = "github:areofyl/fetch";
   ...
 }
 ```
+
 #### Home-manager
 You also need to import the nix package in your ```home.nix```. Check ```nix/home-module.nix``` for the options. Most are the same but hyphens can not be used so camel-case has been used for those options instead.
 
@@ -69,6 +70,17 @@ You also need to import the nix package in your ```home.nix```. Check ```nix/hom
   
 }
 ```
+
+### Gentoo Linux (GURU)
+You can install `fetch` from the GURU repository using:
+
+```bash
+eselect repository enable guru
+emaint sync -r guru
+emerge -a app-misc/fetch
+```
+
+As for all GURU packages, you will have to add the package in your `package.accept\_keywords` directory if `~arch` is not already set.
 
 ## Logos
 
