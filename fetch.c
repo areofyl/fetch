@@ -295,7 +295,8 @@ static int is_cursor_escape(const char *p) {
   return (p[i] && p[i] != 'm');
 }
 
-static int load_logo_fastfetch(const char *name) {
+// Try loading a logo from fastfetch colored output
+static int load_logo_ff_colored(const char *name) {
   char cmd[256];
   snprintf(cmd, sizeof(cmd),
            "fastfetch -l %s --structure \"\" --pipe false 2>/dev/null", name);
@@ -313,7 +314,6 @@ static int load_logo_fastfetch(const char *name) {
     int truncated = 0;
     for (int i = 0; i < len - 2; i++) {
       if (is_cursor_escape(&buf[i])) {
-        // Strip preceding \033[m or \033[0m reset too
         int cut = i;
         if (cut >= 3 && buf[cut - 1] == 'm' && buf[cut - 2] == '[' &&
             buf[cut - 3] == '\033')
@@ -330,8 +330,6 @@ static int load_logo_fastfetch(const char *name) {
 
     if (len == 0 && logo_rows == 0)
       continue;
-    // Only stop on empty lines caused by cursor escapes (system info),
-    // not blank lines that are part of the logo
     if (len == 0 && truncated)
       break;
 
@@ -343,6 +341,65 @@ static int load_logo_fastfetch(const char *name) {
   while (logo_rows > 0 && logo_data[logo_rows - 1][0] == '\0')
     logo_rows--;
   return logo_rows > 0;
+}
+
+// Fallback: load from --print-logos (no colors, but works on older fastfetch)
+static int load_logo_ff_plain(const char *name) {
+  FILE *fp = popen("fastfetch --print-logos 2>/dev/null", "r");
+  if (!fp)
+    return 0;
+
+  char buf[512];
+  int found = 0;
+  int name_len = strlen(name);
+
+  while (fgets(buf, sizeof(buf), fp)) {
+    int len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+      buf[--len] = '\0';
+
+    if (!found) {
+      if (len > 0 && len <= name_len + 1 && buf[len - 1] == ':') {
+        buf[len - 1] = '\0';
+        if (strcasecmp(buf, name) == 0)
+          found = 1;
+      }
+      continue;
+    }
+
+    // Detect next logo header
+    if (len > 1 && len < 40 && buf[len - 1] == ':' && logo_rows > 0 &&
+        ((buf[0] >= 'A' && buf[0] <= 'Z') || (buf[0] >= 'a' && buf[0] <= 'z'))) {
+      int is_header = 1;
+      for (int i = 0; i < len; i++) {
+        if (buf[i] == '\033') {
+          is_header = 0;
+          break;
+        }
+      }
+      if (is_header)
+        break;
+    }
+
+    if (logo_rows >= MAX_LOGO_ROWS)
+      break;
+
+    memcpy(logo_data[logo_rows], buf, len + 1);
+    logo_rows++;
+  }
+  pclose(fp);
+
+  while (logo_rows > 0 && logo_data[logo_rows - 1][0] == '\0')
+    logo_rows--;
+  return logo_rows > 0;
+}
+
+static int load_logo_fastfetch(const char *name) {
+  // Try colored output first (modern fastfetch)
+  if (load_logo_ff_colored(name))
+    return 1;
+  // Fall back to --print-logos (older fastfetch, no colors)
+  return load_logo_ff_plain(name);
 }
 
 // Parse a value from os-release, stripping quotes and newlines
@@ -1988,8 +2045,14 @@ int main(int argc, char **argv) {
           memcpy(logo_data[i], saved_data[i], 512);
       }
     }
-    if (!got_logo && logo_rows == 0)
+    if (!got_logo && logo_rows == 0) {
       load_default_logo();
+      if (distro[0] && strcasecmp(distro, "gentoo") != 0)
+        fprintf(stderr,
+                "fetch: couldn't load %s logo (is fastfetch installed?). "
+                "using built-in gentoo logo.\n",
+                distro);
+    }
   }
 
   // Process logo into codepoint cells
