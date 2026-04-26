@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <termios.h>
@@ -25,6 +26,20 @@ static void handle_signal(int sig) {
   (void)sig;
   cleanup();
   _exit(0);
+}
+
+static volatile int term_resized = 0;
+
+static void handle_winch(int sig) {
+  (void)sig;
+  term_resized = 1;
+}
+
+static int get_term_rows(void) {
+  struct winsize ws;
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
+    return ws.ws_row;
+  return 0;
 }
 
 #define ANIM_WIDTH 60
@@ -2124,16 +2139,22 @@ int main(int argc, char **argv) {
   if (render_height > MAX_HEIGHT)
     render_height = MAX_HEIGHT;
 
+  // Cap to terminal height if we can detect it
+  int term_rows = get_term_rows();
+  if (term_rows > 0 && render_height > term_rows)
+    render_height = term_rows;
+
   build_points();
   compute_threshold();
 
   float A = 0.0f;
   float B = 0.0f;
-  const float K1 = 37.0f * render_height / 36.0f;
+  float K1 = 37.0f * render_height / 36.0f;
   const float K2 = 5.5f;
 
   signal(SIGINT, handle_signal);
   signal(SIGTERM, handle_signal);
+  signal(SIGWINCH, handle_winch);
   atexit(cleanup);
 
   int fetch_start = 1;
@@ -2154,6 +2175,19 @@ int main(int argc, char **argv) {
     struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
     if (poll(&pfd, 1, 0) > 0)
       break;
+    // Handle terminal resize
+    if (term_resized) {
+      term_resized = 0;
+      int new_rows = get_term_rows();
+      if (new_rows > 0) {
+        render_height = new_rows;
+        if (render_height > MAX_HEIGHT)
+          render_height = MAX_HEIGHT;
+        K1 = 37.0f * render_height / 36.0f;
+        printf("\033[2J");
+        fflush(stdout);
+      }
+    }
     // Refresh fast dynamic fields every ~1 second (20 frames).
     // Only uptime/memory/swap — they're pure /proc reads, no popen,
     // so they don't hitch the animation. Battery/disk/ip use popen and
