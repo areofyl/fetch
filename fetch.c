@@ -1551,8 +1551,11 @@ static void gather_terminal(void) {
   } else if (getenv("KITTY_WINDOW_ID")) {
     strcpy(term, "kitty");
   } else {
-    // Get parent process name (the terminal)
-    FILE *fp = popen("ps -o comm= -p $(ps -o ppid= -p $$) 2>/dev/null", "r");
+    // Walk up the process tree from fetch's actual PID
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd),
+             "ps -o comm= -p $(ps -o ppid= -p %d) 2>/dev/null", getpid());
+    FILE *fp = popen(cmd, "r");
     if (fp) {
       if (fgets(term, sizeof(term), fp)) {
         int len = strlen(term);
