@@ -340,6 +340,8 @@ static int load_logo_file(void) {
     }
     if (len == 0 && logo_rows == 0)
       continue;
+    if (len >= (int)sizeof(logo_data[0])) len = (int)sizeof(logo_data[0]) - 1;
+    if (len >= (int)sizeof(logo_data[0])) len = (int)sizeof(logo_data[0]) - 1;
     memcpy(logo_data[logo_rows], buf, len + 1);
     logo_rows++;
   }
@@ -398,6 +400,7 @@ static int load_logo_ff_colored(const char *name) {
     if (len == 0 && truncated)
       break;
 
+    if (len >= (int)sizeof(logo_data[0])) len = (int)sizeof(logo_data[0]) - 1;
     memcpy(logo_data[logo_rows], buf, len + 1);
     logo_rows++;
   }
