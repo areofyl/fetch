@@ -1,4 +1,5 @@
 #include <dirent.h>
+#include <fcntl.h>
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
@@ -9,8 +10,54 @@
 #include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+struct child_proc{
+  FILE *fp;
+  pid_t pid;
+};
+
+static struct child_proc spawn_pipe(const char *path, char *const argv[]) {
+  int pipefd[2];
+  struct child_proc cp = {NULL, -1};
+  if (pipe(pipefd) < 0) {
+    return cp;
+  }
+  pid_t pid = fork();
+  if(pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return cp;
+  }
+
+  if (pid == 0 ) {
+    // Child
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    close(pipefd[1]);
+
+    int fd = open("/dev/null", O_WRONLY);
+    if (fd >= 0) {
+      dup2(fd, STDERR_FILENO);
+      close(fd);
+    }
+    execvp(path, argv);
+    _exit(127);
+  }
+  close(pipefd[1]);
+  cp.fp = fdopen(pipefd[0], "r");
+  cp.pid = pid;
+  return cp;
+}
+
+static int spawn_close(struct child_proc cp){
+  if (cp.fp) fclose(cp.fp);
+  int status;
+  waitpid(cp.pid, &status, 0);
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
 
 static struct termios orig_termios;
 static int termios_saved = 0;
@@ -22,9 +69,10 @@ static void cleanup(void) {
   fflush(stdout);
 }
 
+
+
 static void handle_signal(int sig) {
   (void)sig;
-  cleanup();
   _exit(0);
 }
 
@@ -363,10 +411,11 @@ static int is_cursor_escape(const char *p) {
 
 // Try loading a logo from fastfetch colored output
 static int load_logo_ff_colored(const char *name) {
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd),
-           "fastfetch -l %s -s break --pipe false 2>/dev/null", name);
-  FILE *fp = popen(cmd, "r");
+  char *const argv[] = {"fastfetch", "-l", (char *)name,
+                        "-s", "break", "--pipe", "false", NULL};
+  struct child_proc cp = spawn_pipe("fastfetch", argv);
+  if (!cp.fp) return 0;
+  FILE *fp = cp.fp;
   if (!fp)
     return 0;
 
@@ -410,7 +459,7 @@ static int load_logo_ff_colored(const char *name) {
     memcpy(logo_data[logo_rows], buf, len + 1);
     logo_rows++;
   }
-  pclose(fp);
+  spawn_close(cp);
 
   while (logo_rows > 0 && logo_data[logo_rows - 1][0] == '\0')
     logo_rows--;
@@ -482,6 +531,7 @@ static int parse_os_release_val(const char *buf, int prefix_len, char *out,
                                 int maxlen) {
   int len = strlen(buf);
   char tmp[256];
+  if(len <= prefix_len) return 0;
   if (len - prefix_len >= (int)sizeof(tmp))
     return 0;
   memcpy(tmp, buf + prefix_len, len - prefix_len + 1);
@@ -1059,9 +1109,9 @@ static void gather_shell(void) {
 
   // Try to get version
   char version[128] = "";
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd), "%s --version 2>/dev/null", shell);
-  FILE *fp = popen(cmd, "r");
+  char *const argv[] = {shell, "--version", NULL};
+  struct child_proc cp = spawn_pipe(shell, argv);
+  FILE *fp = cp.fp;
   if (fp) {
     char buf[256];
     if (fgets(buf, sizeof(buf), fp)) {
@@ -1088,7 +1138,7 @@ static void gather_shell(void) {
         version[len] = '\0';
       }
     }
-    pclose(fp);
+    spawn_close(cp);
   }
 
   if (version[0])
@@ -1321,9 +1371,10 @@ static void gather_cpu(void) {
 static int gpu_lookup_lspci(const char *pci_id, char *out, int outlen) {
   if (!pci_id || !pci_id[0])
     return 0;
-  char cmd[128];
-  snprintf(cmd, sizeof(cmd), "lspci -d %s 2>/dev/null", pci_id);
-  FILE *fp = popen(cmd, "r");
+  char *const argv[] = {"lspci", "-d", (char *)pci_id, NULL};
+  struct child_proc cp = spawn_pipe("lspci", argv);
+  FILE *fp = cp.fp;
+
   if (!fp)
     return 0;
   char line[256];
@@ -1370,7 +1421,7 @@ static int gpu_lookup_lspci(const char *pci_id, char *out, int outlen) {
       ok = 1;
     }
   }
-  pclose(fp);
+  spawn_close(cp);
   return ok;
 }
 
