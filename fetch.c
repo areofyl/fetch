@@ -2999,7 +2999,7 @@ int main(int argc, char **argv) {
         config_depth = 0.1f;
       if (config_depth > 10.0f)
         config_depth = 10.0f;
-      } else if (strcmp(argv[i], "--box") == 0) {
+    } else if (strcmp(argv[i], "--box") == 0) {
       box_flag = 1;
     }
   }
