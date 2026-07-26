@@ -243,6 +243,7 @@ colors
 | `--size <float>` | Scale the logo (e.g. 2.0 for double size) |
 | `--depth <float>` | Scale the 3D depth (default 1.0) |
 | `--height <n>` | Override render height in rows |
+| `--box` | Draw a border box around the info block |
 | `--no-info` | Just the logo, no system info |
 | `--no-color` | Disable coloring |
 | `--frames <n>` | Stop after n frames |
