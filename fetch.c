@@ -792,6 +792,18 @@ static char config_logo_inner[32] = "";
 static char extra_disks[MAX_EXTRA_DISKS][128];
 static int extra_disk_count = 0;
 
+// --- Live CPU/GPU meters (usage + temperature) ---
+// Cache the static model text and line index so the per-second refresh can
+// rebuild "model — X% · Y°C" without re-running the slow lspci lookup.
+#define MAX_GPU_LINES 8
+static int refresh_line_override = -1; // in refresh mode, force add_info's target line
+static int cpu_line_idx = -1;
+static char cpu_line_base[224] = "";
+static int gpu_line_idx[MAX_GPU_LINES];
+static char gpu_line_base[MAX_GPU_LINES][224];
+static char gpu_line_card[MAX_GPU_LINES][24];
+static int gpu_line_n = 0;
+
 // Light direction presets
 static float light_x = 0.4082f, light_y = 0.8165f, light_z = -0.4082f;
 
@@ -1053,7 +1065,8 @@ static void add_info(const char *label, const char *fmt, ...) {
   // append a new line (so gathers that emit multiple rows, like multi-GPU,
   // don't overwrite themselves).
   if (is_refresh_pass && current_field >= 0 && field_line[current_field] >= 0) {
-    int idx = field_line[current_field];
+    int idx = (refresh_line_override >= 0) ? refresh_line_override
+                                           : field_line[current_field];
     if (box_width > 0) {
       int w = visible_width(line);
       int pad = box_width - w;
@@ -1711,6 +1724,188 @@ static void gather_wm(void) {
 #endif
 }
 
+// --- Live meter helpers (all cheap /proc & /sys reads, no popen) ---
+
+// Read the first long integer from a file. Returns 1 on success.
+static int read_long_file(const char *path, long *out) {
+  FILE *f = fopen(path, "r");
+  if (!f)
+    return 0;
+  long v;
+  int ok = (fscanf(f, "%ld", &v) == 1);
+  fclose(f);
+  if (ok)
+    *out = v;
+  return ok;
+}
+
+// Overall CPU usage % from /proc/stat, computed as the delta between calls.
+// Returns -1 on the very first call (no baseline yet) or on error.
+static int cpu_usage_pct(void) {
+  static long prev_idle = 0, prev_total = 0;
+  static int have_prev = 0;
+  FILE *f = fopen("/proc/stat", "r");
+  if (!f)
+    return -1;
+  char lbl[8] = "";
+  long user = 0, nice = 0, sys = 0, idle = 0, iowait = 0, irq = 0, softirq = 0,
+       steal = 0;
+  int n = fscanf(f, "%7s %ld %ld %ld %ld %ld %ld %ld %ld", lbl, &user, &nice,
+                 &sys, &idle, &iowait, &irq, &softirq, &steal);
+  fclose(f);
+  if (n < 5 || strncmp(lbl, "cpu", 3) != 0)
+    return -1;
+  long idle_all = idle + iowait;
+  long total = user + nice + sys + idle + iowait + irq + softirq + steal;
+  int pct = -1;
+  if (have_prev) {
+    long dt = total - prev_total, di = idle_all - prev_idle;
+    if (dt > 0) {
+      pct = (int)((dt - di) * 100 / dt);
+      if (pct < 0)
+        pct = 0;
+      if (pct > 100)
+        pct = 100;
+    } else {
+      pct = 0;
+    }
+  }
+  prev_idle = idle_all;
+  prev_total = total;
+  have_prev = 1;
+  return pct;
+}
+
+// CPU temperature in °C. Scans hwmon for an AMD/Intel CPU sensor, prefers a
+// labelled Tctl/Tdie/Package/Tccd input, falls back to temp1_input.
+static int cpu_temp_c(void) {
+  DIR *d = opendir("/sys/class/hwmon");
+  if (!d)
+    return -1;
+  struct dirent *e;
+  int result = -1;
+  while ((e = readdir(d)) && result < 0) {
+    if (strncmp(e->d_name, "hwmon", 5) != 0)
+      continue;
+    char p[160], nm[32] = "";
+    snprintf(p, sizeof(p), "/sys/class/hwmon/%s/name", e->d_name);
+    FILE *nf = fopen(p, "r");
+    if (nf) {
+      if (fgets(nm, sizeof(nm), nf))
+        nm[strcspn(nm, "\n")] = '\0';
+      fclose(nf);
+    }
+    if (strcmp(nm, "k10temp") != 0 && strcmp(nm, "zenpower") != 0 &&
+        strcmp(nm, "coretemp") != 0)
+      continue;
+    long milli = -1;
+    for (int i = 1; i <= 12 && milli < 0; i++) {
+      char lp[200], lbl[32] = "";
+      snprintf(lp, sizeof(lp), "/sys/class/hwmon/%s/temp%d_label", e->d_name, i);
+      FILE *lf = fopen(lp, "r");
+      if (lf) {
+        if (fgets(lbl, sizeof(lbl), lf))
+          lbl[strcspn(lbl, "\n")] = '\0';
+        fclose(lf);
+      }
+      if (lbl[0] && (strstr(lbl, "Tctl") || strstr(lbl, "Tdie") ||
+                     strstr(lbl, "Package") || strstr(lbl, "Tccd"))) {
+        char vp[200];
+        long v;
+        snprintf(vp, sizeof(vp), "/sys/class/hwmon/%s/temp%d_input", e->d_name,
+                 i);
+        if (read_long_file(vp, &v))
+          milli = v;
+      }
+    }
+    if (milli < 0) {
+      char vp[200];
+      long v;
+      snprintf(vp, sizeof(vp), "/sys/class/hwmon/%s/temp1_input", e->d_name);
+      if (read_long_file(vp, &v))
+        milli = v;
+    }
+    if (milli >= 0)
+      result = (int)((milli + 500) / 1000);
+  }
+  closedir(d);
+  return result;
+}
+
+// amdgpu utilisation % for a given DRM card (e.g. "card0"). -1 if unavailable.
+static int gpu_busy_pct(const char *card) {
+  char p[256];
+  long v;
+  snprintf(p, sizeof(p), "/sys/class/drm/%s/device/gpu_busy_percent", card);
+  if (read_long_file(p, &v))
+    return (int)v;
+  return -1;
+}
+
+// amdgpu edge temperature in °C for a given DRM card. -1 if unavailable.
+static int gpu_temp_c(const char *card) {
+  char base[256];
+  snprintf(base, sizeof(base), "/sys/class/drm/%s/device/hwmon", card);
+  DIR *d = opendir(base);
+  if (!d)
+    return -1;
+  struct dirent *e;
+  int result = -1;
+  while ((e = readdir(d)) && result < 0) {
+    if (strncmp(e->d_name, "hwmon", 5) != 0)
+      continue;
+    char vp[320];
+    long v;
+    snprintf(vp, sizeof(vp), "%s/%s/temp1_input", base, e->d_name);
+    if (read_long_file(vp, &v))
+      result = (int)((v + 500) / 1000);
+  }
+  closedir(d);
+  return result;
+}
+
+// Assigns a color to different threshold
+#define color_green "\x1b[32m"
+#define color_yellow "\x1b[33m"
+#define color_red "\x1b[31m"
+#define color_reset "\x1b[0m"
+
+typedef enum {
+    TYPE_USAGE,
+    TYPE_TEMPERATURE
+} TypeData;
+
+static const char *color_for(int value, TypeData type) {
+  if (type == TYPE_USAGE) {
+      if (value <= 25) return color_green;
+      if (value <= 75) return color_yellow;
+      return color_red;
+    }
+  if (type == TYPE_TEMPERATURE) {
+      if (value <= 50) return color_green;
+      if (value <= 70) return color_yellow;
+      return color_red;
+    }
+  return color_reset;
+}
+
+// Append " — X% · Y°C" (whichever parts are available) to a model string.
+static void append_meters(char *s, size_t n, int usage, int temp) {
+  size_t len = strlen(s);
+  if (len >= n)
+    return;
+if (usage >= 0 && temp >= 0)
+    snprintf(s + len, n - len, " \xe2\x80\x94 (%s%d%%%s \xc2\xb7 %s%d\xc2\xb0\x43%s)",
+       color_for(usage, TYPE_USAGE), usage, color_reset,
+       color_for(temp, TYPE_TEMPERATURE), temp, color_reset);
+  else if (temp >= 0)
+     snprintf(s + len, n - len, " \xe2\x80\x94 (%s%d\xc2\xb0\x43%s)",
+        color_for(temp, TYPE_TEMPERATURE), temp, color_reset);
+  else if (usage >= 0)
+      snprintf(s + len, n - len, " \xe2\x80\x94 (%s%d%%%s)",
+          color_for(usage, TYPE_USAGE), usage, color_reset);
+}
+
 static void gather_cpu(void) {
 #ifdef __APPLE__
   char name[128] = "";
@@ -1810,12 +2005,19 @@ static void gather_cpu(void) {
   }
 
   if (name[0]) {
+    char line[224];
     if (cores > 0 && max_ghz > 0)
-      add_info("CPU", "%s (%d) @ %.2f GHz", name, cores, max_ghz);
+      snprintf(line, sizeof(line), "%s (%d) @ %.2f GHz", name, cores, max_ghz);
     else if (cores > 0)
-      add_info("CPU", "%s (%d)", name, cores);
+      snprintf(line, sizeof(line), "%s (%d)", name, cores);
     else
-      add_info("CPU", "%s", name);
+      snprintf(line, sizeof(line), "%s", name);
+    // Remember the plain model text so the refresh tick can rebuild the line.
+    strncpy(cpu_line_base, line, sizeof(cpu_line_base) - 1);
+    cpu_line_base[sizeof(cpu_line_base) - 1] = '\0';
+    append_meters(line, sizeof(line), cpu_usage_pct(), cpu_temp_c());
+    add_info("CPU", "%s", line);
+    cpu_line_idx = field_line[F_CPU];
   }
 #endif
 }
@@ -2006,13 +2208,52 @@ static void gather_gpu(void) {
 
     if (!name[0])
       continue;
+    char gline[224];
     if (type[0])
-      add_info("GPU", "%s [%s]", name, type);
+      snprintf(gline, sizeof(gline), "%s [%s]", name, type);
     else
-      add_info("GPU", "%s", name);
+      snprintf(gline, sizeof(gline), "%s", name);
+    // Remember this card's plain model text + DRM name for the refresh tick.
+    if (gpu_line_n < MAX_GPU_LINES) {
+      int k = gpu_line_n;
+      strncpy(gpu_line_base[k], gline, sizeof(gpu_line_base[k]) - 1);
+      gpu_line_base[k][sizeof(gpu_line_base[k]) - 1] = '\0';
+      strncpy(gpu_line_card[k], ent->d_name, sizeof(gpu_line_card[k]) - 1);
+      gpu_line_card[k][sizeof(gpu_line_card[k]) - 1] = '\0';
+    }
+    append_meters(gline, sizeof(gline), gpu_busy_pct(ent->d_name),
+                  gpu_temp_c(ent->d_name));
+    add_info("GPU", "%s", gline);
+    if (gpu_line_n < MAX_GPU_LINES)
+      gpu_line_idx[gpu_line_n++] = field_line[F_GPU];
   }
   closedir(d);
 #endif
+}
+
+// Rebuild the CPU and GPU lines in place with fresh usage/temperature.
+// Uses the cached model text — never re-runs the slow lspci lookup — so it is
+// safe to call every frame-refresh tick without hitching the animation.
+static void refresh_cpu_gpu_meters(void) {
+  if (cpu_line_idx >= 0) {
+    char line[256];
+    snprintf(line, sizeof(line), "%.223s", cpu_line_base);
+    append_meters(line, sizeof(line), cpu_usage_pct(), cpu_temp_c());
+    current_field = F_CPU;
+    refresh_line_override = cpu_line_idx;
+    add_info("CPU", "%s", line);
+    refresh_line_override = -1;
+  }
+  for (int k = 0; k < gpu_line_n; k++) {
+    char line[256];
+    snprintf(line, sizeof(line), "%.223s", gpu_line_base[k]);
+    append_meters(line, sizeof(line), gpu_busy_pct(gpu_line_card[k]),
+                  gpu_temp_c(gpu_line_card[k]));
+    current_field = F_GPU;
+    refresh_line_override = gpu_line_idx[k];
+    add_info("GPU", "%s", line);
+    refresh_line_override = -1;
+  }
 }
 
 static void gather_memory(void) {
@@ -3236,6 +3477,7 @@ int main(int argc, char **argv) {
         current_field = F_SWAP;
         gather_swap();
       }
+      refresh_cpu_gpu_meters();
       current_field = -1;
       is_refresh_pass = 0;
     }
