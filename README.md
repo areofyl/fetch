@@ -185,8 +185,16 @@ Stats like memory, battery, and uptime update in real-time while the logo spins.
 Create `~/.config/fetch/config` to customize:
 
 ```
+=== Additional info ===
 # fields – list to show, in this order
 # remove or comment out to hide
+# You do not have to remove the hint in brackets!
+# That is automatically handled by the parser on all options except for the following:
+# disk=
+# seperator=
+# shading=
+# === Config start ===
+
 os
 host
 kernel
