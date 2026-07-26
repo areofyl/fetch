@@ -941,13 +941,13 @@ static void load_config(void) {
       continue;
     }
     if (strncmp(line, "shading=", 8) == 0) {
-      char *val = line + 8; // note: no strip_inline_hint() here to allow freeform shading strings
-      strncpy(config_shading, val, sizeof(config_shading) - 1);
+      // note: no strip_inline_hint() here to allow freeform shading strings
+      strncpy(config_shading, line + 8, sizeof(config_shading) - 1);
       continue;
     }
     if (strncmp(line, "separator=", 10) == 0) {
-      char *val = line + 10; // note: no strip_inline_hint() here to allow freeform separator strings
-      strncpy(config_separator, val, sizeof(config_separator) - 1);
+      // note: no strip_inline_hint() here to allow freeform separator strings
+      strncpy(config_separator, line + 10, sizeof(config_separator) - 1);
       continue;
     }
     if (strncmp(line, "depth=", 6) == 0) {
