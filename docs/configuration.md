@@ -109,6 +109,13 @@ depth=1.0
 3D extrusion depth. Higher = chunkier relief. Range: 0.1 to 10.0. If not set, fetch auto-scales depth based on the logo's character variance so flat logos don't look paper-thin.
 
 ```
+thickness=1
+```
+
+Logo extrusion layers. `1` renders a flat bas-relief that preserves the logo silhouette. Higher values extrude the logo into a thicker relief (up to 16). If unset, fetch defaults to standard 3D extrusion.
+
+
+```
 height=36
 ```
 

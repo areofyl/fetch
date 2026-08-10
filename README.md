@@ -236,6 +236,7 @@ colors
 # speed=1.0             (rotation speed)
 # size=1.0              (logo scale, e.g. 2.0 for double size)
 # depth=1.0             (3D extrusion depth, e.g. 3.0 for chunkier look)
+# thickness=1          (logo extrusion layers: 1 = flat relief, up to 16; unset = classic 3D)
 # height=36             (override render height in rows)
 ```
 
@@ -249,6 +250,7 @@ colors
 | `-s`, `--speed <float>` | Speed multiplier (default 1.0) |
 | `--size <float>` | Scale the logo (e.g. 2.0 for double size) |
 | `--depth <float>` | Scale the 3D depth (default 1.0) |
+| `--thickness <n>` | Logo extrusion layers (1 = flat relief, up to 16; unset = classic 3D) |
 | `--height <n>` | Override render height in rows |
 | `--box` | Draw a border box around the info block |
 | `--no-info` | Just the logo, no system info |

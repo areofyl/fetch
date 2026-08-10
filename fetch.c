@@ -892,6 +892,7 @@ static char config_shading_mode[16] = "";
 static char config_separator[8] = "-";
 static float config_depth = 1.0f;
 static int depth_user_set = 0;
+static int config_thickness = 0; // 0 = auto (classic 3D extrusion); >=1 = fixed relief layers
 static char config_logo_outer[32] = "";
 static char config_logo_inner[32] = "";
 #define MAX_EXTRA_DISKS 8
@@ -1056,6 +1057,16 @@ static void load_config(void) {
       if (config_depth < 0.1f) config_depth = 0.1f;
       if (config_depth > 10.0f) config_depth = 10.0f;
       depth_user_set = 1;
+      continue;
+    }
+    if (strncmp(line, "thickness=", 10) == 0) {
+      char *val = line + 10;
+      strip_inline_hint(val);
+      config_thickness = atoi(val);
+      if (config_thickness < 1)
+        config_thickness = 1;
+      if (config_thickness > 16)
+        config_thickness = 16;
       continue;
     }
     if (strncmp(line, "logo_outer=", 11) == 0) {
@@ -3559,6 +3570,31 @@ static void apply_layout(int show_info) {
   }
 }
 
+// --- Functional helpers for logo relief (pure: no side effects) ---
+
+// Number of surface layers extruded along z when the user pins `thickness`.
+// 1 renders each cell as a single surface point at z=0, preserving the flat
+// logo silhouette (bas-relief). Larger values extrude the logo into a thicker
+// relief. When unset (0) build_points falls back to the classic 3D extrusion.
+static int relief_layers(void) {
+  int n = config_thickness;
+  if (n < 1)
+    n = 1;
+  if (n > 16)
+    n = 16;
+  return n;
+}
+
+// Maps a layer index to its normalized offset within [-0.5, 0.5].
+static float layer_offset(int k, int layers) {
+  return layers > 1 ? ((float)k / (layers - 1)) - 0.5f : 0.0f;
+}
+
+// Maps a layer index to its side-normal parameter within [-1, 1].
+static float layer_tn(int k, int layers) {
+  return layers > 1 ? ((float)k / (layers - 1)) * 2.0f - 1.0f : 0.0f;
+}
+
 static void build_points(void) {
   const float sx = 0.07f;
   const float sy = 0.14f;
@@ -3692,28 +3728,33 @@ static void build_points(void) {
           float oy = (cy - frow) * sy;
           float zr = ih * zmax;
 
-          // Only add side layers for interior cells. Edge cells
-          // (adjacent to empty space) only get front + back to avoid
-          // "tail" artifacts during rotation.
-          int is_edge = 0;
-          for (int dr = -1; dr <= 1 && !is_edge; dr++) {
-            for (int dc = -1; dc <= 1 && !is_edge; dc++) {
-              if (dr == 0 && dc == 0)
-                continue;
-              int nr = row + dr, nc = col + dc;
-              float nh = 0;
-              if (nr >= 0 && nr < logo_rows && nc >= 0 && nc < logo_cols)
-                nh = hmap[nr][nc];
-              if (nh <= 0.0f)
-                is_edge = 1;
+          int layers;
+          if (config_thickness >= 1) {
+            layers = relief_layers();
+          } else {
+            // Only add side layers for interior cells. Edge cells
+            // (adjacent to empty space) only get front + back to avoid
+            // "tail" artifacts during rotation.
+            int is_edge = 0;
+            for (int dr = -1; dr <= 1 && !is_edge; dr++) {
+              for (int dc = -1; dc <= 1 && !is_edge; dc++) {
+                if (dr == 0 && dc == 0)
+                  continue;
+                int nr = row + dr, nc = col + dc;
+                float nh = 0;
+                if (nr >= 0 && nr < logo_rows && nc >= 0 && nc < logo_cols)
+                  nh = hmap[nr][nc];
+                if (nh <= 0.0f)
+                  is_edge = 1;
+              }
             }
+            layers = (is_edge || ih < 0.15f) ? 2 : Z_LAYERS;
           }
-          int layers = (is_edge || ih < 0.15f) ? 2 : Z_LAYERS;
 
           for (int k = 0; k < layers; k++) {
             if (idx >= MAX_POINTS)
               break;
-            float t = ((float)k / (layers - 1)) - 0.5f;
+            float t = layer_offset(k, layers);
             PX[idx] = ox;
             PY[idx] = oy;
             PZ[idx] = t * 2.0f * zr;
@@ -3754,7 +3795,7 @@ static void build_points(void) {
                 ex /= el;
                 ey /= el;
               }
-              float tn = ((float)k / (layers - 1)) * 2.0f - 1.0f;
+              float tn = layer_tn(k, layers);
               float side = sqrtf(1.0f - tn * tn);
               NX[idx] = ex * side;
               NY[idx] = ey * side;
@@ -3852,6 +3893,8 @@ int main(int argc, char **argv) {
           "  --size <float>            Scale the logo (e.g. 2.0 for double "
           "size)\n"
           "  --depth <float>           Scale the 3D depth (default 1.0)\n"
+          "  --thickness <n>           Logo extrusion layers (1 = flat relief,\n"
+          "                            up to 16; unset = classic 3D extrusion)\n"
           "  --height <n>              Override render height in rows\n"
           "  --no-info                 Just the logo, no system info\n"
           "  --no-color                Disable logo coloring\n"
@@ -3890,7 +3933,9 @@ int main(int argc, char **argv) {
           "    spin=<axes>              Rotation axes (x, y, or xy)\n"
           "    speed=<float>            Rotation speed\n"
           "    size=<float>             Logo scale\n"
-          "    height=<n>               Render height in rows\n\n"
+          "    height=<n>               Render height in rows\n"
+          "    thickness=<n>           Logo extrusion layers (1 = flat relief,\n"
+          "                            up to 16; unset = classic 3D extrusion)\n\n"
           "    box=<0/1>                Draw a border box around the info block\n\n"
           "Logo: ~/.config/fetch/logo.txt\n"
           "  Custom ASCII/Unicode logo. Add '# distro: <name>' as the\n"
@@ -3971,6 +4016,16 @@ int main(int argc, char **argv) {
       if (config_depth > 10.0f)
         config_depth = 10.0f;
       depth_user_set = 1;
+    } else if (strcmp(argv[i], "--thickness") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
+        return 1;
+      }
+      config_thickness = atoi(argv[++i]);
+      if (config_thickness < 1)
+        config_thickness = 1;
+      if (config_thickness > 16)
+        config_thickness = 16;
     } else if (strcmp(argv[i], "--box") == 0) {
       box_flag = 1;
     } else {
