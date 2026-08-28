@@ -33,6 +33,19 @@
 static struct termios orig_termios;
 static int termios_saved = 0;
 
+enum v_alignment
+{
+  V_ALIGN_TOP,
+  V_ALIGN_CENTER,
+  V_ALIGN_BOTTOM
+};
+enum h_alignment
+{
+  H_ALIGN_LEFT,
+  H_ALIGN_CENTER,
+  H_ALIGN_RIGHT
+};
+
 static void cleanup(void) {
   if (termios_saved)
     tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
@@ -898,6 +911,8 @@ static char config_logo_inner[32] = "";
 #define MAX_EXTRA_DISKS 8
 static char extra_disks[MAX_EXTRA_DISKS][128];
 static int extra_disk_count = 0;
+static enum v_alignment config_v_alignment = V_ALIGN_TOP;
+static enum h_alignment config_h_alignment = H_ALIGN_LEFT;
 
 // Light direction presets
 static float light_x = 0.4082f, light_y = 0.8165f, light_z = -0.4082f;
@@ -1140,6 +1155,34 @@ static void load_config(void) {
         field_order[field_count++] = F_DISK;
       }
       continue;
+    }
+
+    if (strncmp(line, "v_alignment=", 12) == 0) {
+      char* val = line + 12;
+      strip_inline_hint(val);
+      if (strcmp(val, "top") == 0) {
+        config_v_alignment = V_ALIGN_TOP;
+      }
+      else if (strcmp(val, "center") == 0) {
+        config_v_alignment = V_ALIGN_CENTER;
+      }
+      else if (strcmp(val, "bottom") == 0) {
+        config_v_alignment = V_ALIGN_BOTTOM;
+      }
+    }
+
+    if (strncmp(line, "h_alignment=", 12) == 0) {
+      char* val = line + 12;
+      strip_inline_hint(val);
+      if (strcmp(val, "left") == 0) {
+        config_h_alignment = H_ALIGN_LEFT;
+      }
+      else if (strcmp(val, "center") == 0) {
+        config_h_alignment = H_ALIGN_CENTER;
+      }
+      else if (strcmp(val, "right") == 0) {
+        config_h_alignment = H_ALIGN_RIGHT;
+      }
     }
 
     // Match field name
@@ -3899,6 +3942,46 @@ static void set_distro_colors(const char *distro) {
   }
 }
 
+void get_alignment_padding(int* vertical, int* horizontal) {
+  size_t max = 0;
+  for (int i = 0; i < fetch_line_count; i++) {
+      size_t len = visible_width(fetch_lines[i]);
+      if (len > max) {
+          max = len;
+      }
+  }
+
+  int term_height;
+  int term_width;
+  get_term_size(&term_height, &term_width);
+
+  switch (config_v_alignment)
+  {
+    default:
+    case V_ALIGN_TOP:
+      *vertical = 0;
+      break;
+    case V_ALIGN_CENTER:
+      *vertical = term_height / 2 - render_height / 2;
+      break;
+    case V_ALIGN_BOTTOM:
+      *vertical = term_height - (render_height);
+  }
+
+  switch (config_h_alignment)
+  {
+    default:
+    case H_ALIGN_LEFT:
+      *horizontal = 0;
+      break;
+    case H_ALIGN_CENTER:
+      *horizontal = term_width / 2 - (anim_width + GAP + max) / 2;
+      break;
+    case H_ALIGN_RIGHT:
+      *horizontal= term_width - (anim_width + GAP + max);
+  }
+}
+
 int main(int argc, char **argv) {
   char distro[64] = "";
   const char *logo_name = NULL;
@@ -4395,10 +4478,14 @@ int main(int argc, char **argv) {
       }
     }
 
+    int top_padding;
+    int left_padding;
+    get_alignment_padding(&top_padding, &left_padding);
+
     // Batch entire frame into a single write (reuse buffer across frames)
     static char *out_buf = NULL;
     static size_t out_cap = 0;
-    size_t need = (render_height + stacked_info_rows + 2) * 2048u + 64;
+    size_t need = (render_height + stacked_info_rows + 2) * (2048u + left_padding) + 64 + top_padding;
     if (need > out_cap) {
       free(out_buf);
       out_buf = malloc(need);
@@ -4424,7 +4511,17 @@ int main(int argc, char **argv) {
     int inner_len = strlen(color_inner);
     int outer_len = strlen(color_outer);
 
+    if (top_padding > 0) {
+      memset(p, '\n', top_padding);
+      p += top_padding;
+    }
+
     for (int i = 0; i < render_height && p + 8 < end; i++) {
+      if (left_padding > 0) {
+        memset(p, ' ', left_padding);
+        p += left_padding;
+      }
+
       if (!use_color) {
         for (int j = 0; j < aw && p + 8 < end; j++) {
           int c = 0;
