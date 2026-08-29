@@ -3595,8 +3595,8 @@ static const char *cell_glyph(int row, int col, int smax, int *color_out) {
 // shrink the canvas to keep the info intact; phone-width ones stack the
 // info below the logo. Info lines clip instead of wrapping.
 static void apply_layout(int show_info) {
-  int rows = 0, cols = 0;
-  get_term_size(&rows, &cols);
+  int rows = term_rows; 
+  int cols = term_cols;
   if (rows > 1)
     rows--; // leave 1 row margin to prevent scroll-jitter
 
@@ -4370,6 +4370,7 @@ int main(int argc, char **argv) {
     // Handle terminal resize: recompute the same layout as startup
     if (term_resized) {
       term_resized = 0;
+      get_term_size(&term_rows, &term_cols);
       int old_h = render_height, old_w = anim_width;
       int old_stacked = layout_stacked, old_clip = info_clip_cols;
       apply_layout(show_info);
@@ -4379,7 +4380,6 @@ int main(int argc, char **argv) {
         printf("\033[2J");
         fflush(stdout);
       }
-      get_term_size(&term_rows, &term_cols);
     }
     // Refresh fast dynamic fields every ~1 second (20 frames).
     // Only uptime/memory/swap — they're pure /proc reads, no popen,
