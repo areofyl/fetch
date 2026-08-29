@@ -33,14 +33,12 @@
 static struct termios orig_termios;
 static int termios_saved = 0;
 
-enum v_alignment
-{
+enum v_alignment {
   V_ALIGN_TOP,
   V_ALIGN_CENTER,
   V_ALIGN_BOTTOM
 };
-enum h_alignment
-{
+enum h_alignment {
   H_ALIGN_LEFT,
   H_ALIGN_CENTER,
   H_ALIGN_RIGHT
@@ -88,6 +86,8 @@ static int anim_width = ANIM_WIDTH; // canvas columns, shrinks on narrow termina
 static int layout_stacked = 0;      // info below the logo instead of beside it
 static int info_clip_cols = -1;     // clip info lines to this many visible columns
 static int stacked_info_rows = 0;   // info lines shown in stacked layout
+static int term_cols = 0;
+static int term_rows = 0;
 #define PI 3.14159265f
 #ifndef FETCH_VERSION
 #define FETCH_VERSION "dev"
@@ -1158,31 +1158,29 @@ static void load_config(void) {
     }
 
     if (strncmp(line, "v_alignment=", 12) == 0) {
-      char* val = line + 12;
+      char *val = line + 12;
       strip_inline_hint(val);
       if (strcmp(val, "top") == 0) {
         config_v_alignment = V_ALIGN_TOP;
-      }
-      else if (strcmp(val, "center") == 0) {
+      } else if (strcmp(val, "center") == 0) {
         config_v_alignment = V_ALIGN_CENTER;
-      }
-      else if (strcmp(val, "bottom") == 0) {
+      } else if (strcmp(val, "bottom") == 0) {
         config_v_alignment = V_ALIGN_BOTTOM;
       }
+      continue;
     }
 
     if (strncmp(line, "h_alignment=", 12) == 0) {
-      char* val = line + 12;
+      char *val = line + 12;
       strip_inline_hint(val);
       if (strcmp(val, "left") == 0) {
         config_h_alignment = H_ALIGN_LEFT;
-      }
-      else if (strcmp(val, "center") == 0) {
+      } else if (strcmp(val, "center") == 0) {
         config_h_alignment = H_ALIGN_CENTER;
-      }
-      else if (strcmp(val, "right") == 0) {
+      } else if (strcmp(val, "right") == 0) {
         config_h_alignment = H_ALIGN_RIGHT;
       }
+      continue;
     }
 
     // Match field name
@@ -3942,43 +3940,39 @@ static void set_distro_colors(const char *distro) {
   }
 }
 
-void get_alignment_padding(int* vertical, int* horizontal) {
+static void get_alignment_padding(int* vertical, int* horizontal) {
   size_t max = 0;
   for (int i = 0; i < fetch_line_count; i++) {
-      size_t len = visible_width(fetch_lines[i]);
-      if (len > max) {
-          max = len;
-      }
+    size_t len = visible_width(fetch_lines[i]);
+    if (len > max) {
+      max = len;
+    }
   }
 
-  int term_height;
-  int term_width;
-  get_term_size(&term_height, &term_width);
-
-  switch (config_v_alignment)
-  {
+  switch (config_v_alignment) {
     default:
     case V_ALIGN_TOP:
       *vertical = 0;
       break;
     case V_ALIGN_CENTER:
-      *vertical = term_height / 2 - render_height / 2;
+      *vertical = term_rows / 2 - render_height / 2;
       break;
     case V_ALIGN_BOTTOM:
-      *vertical = term_height - (render_height);
+      *vertical = term_rows - (render_height);
+      break;
   }
 
-  switch (config_h_alignment)
-  {
+  switch (config_h_alignment) {
     default:
     case H_ALIGN_LEFT:
       *horizontal = 0;
       break;
     case H_ALIGN_CENTER:
-      *horizontal = term_width / 2 - (anim_width + GAP + max) / 2;
+      *horizontal = term_cols / 2 - (anim_width + GAP + max) / 2;
       break;
     case H_ALIGN_RIGHT:
-      *horizontal= term_width - (anim_width + GAP + max);
+      *horizontal= term_cols - (anim_width + GAP + max);
+      break;
   }
 }
 
@@ -4144,6 +4138,7 @@ int main(int argc, char **argv) {
 
   config_defaults();
   load_config();
+  get_term_size(&term_rows, &term_cols);
 
   // Shading: CLI flags, then config, then the ascii default
   if (!shading && config_shading[0])
@@ -4384,6 +4379,7 @@ int main(int argc, char **argv) {
         printf("\033[2J");
         fflush(stdout);
       }
+      get_term_size(&term_rows, &term_cols);
     }
     // Refresh fast dynamic fields every ~1 second (20 frames).
     // Only uptime/memory/swap — they're pure /proc reads, no popen,
