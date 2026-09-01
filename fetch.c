@@ -4227,22 +4227,32 @@ int main(int argc, char **argv) {
       static char ibuf[128];
       static int ibuf_len = 0;
 
-      // If buffer is empty, read first byte to check if it's a mouse escape
       if (ibuf_len == 0) {
-        int n = read(STDIN_FILENO, ibuf, 1);
-        if (n <= 0) { should_break = 1; break; }
-        if (ibuf[0] != '\033') {
-          // Regular keypress — try to push it back so the shell gets it
-          ioctl(STDIN_FILENO, TIOCSTI, &ibuf[0]);
+        // Check how many bytes are pending before reading.
+        // Mouse escapes are at least 9 bytes (\033[<0;1;1M).
+        // A single pending byte is a regular keypress — exit
+        // without consuming it so the shell gets it.
+        int avail = 0;
+        ioctl(STDIN_FILENO, FIONREAD, &avail);
+        if (avail <= 0) break;
+        if (avail == 1) {
+          // Almost certainly a keypress, not a mouse event.
+          // Leave it in the buffer for the shell.
           should_break = 1;
           break;
         }
-        ibuf_len = 1;
+        int n = read(STDIN_FILENO, ibuf, avail < (int)sizeof(ibuf) ? avail : (int)sizeof(ibuf));
+        if (n <= 0) { should_break = 1; break; }
+        ibuf_len = n;
+        if (ibuf[0] != '\033') {
+          ibuf_len = 0;
+          should_break = 1;
+          break;
+        }
+      } else {
+        int n = read(STDIN_FILENO, ibuf + ibuf_len, sizeof(ibuf) - ibuf_len);
+        if (n > 0) ibuf_len += n;
       }
-
-      // Read more of the escape sequence
-      int n = read(STDIN_FILENO, ibuf + ibuf_len, sizeof(ibuf) - ibuf_len);
-      if (n > 0) ibuf_len += n;
 
       int i = 0;
       while (i < ibuf_len) {
