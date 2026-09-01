@@ -253,6 +253,8 @@ colors
 # size=1.0              (logo scale, e.g. 2.0 for double size)
 # depth=1.0             (3D extrusion depth, e.g. 3.0 for chunkier look)
 # height=36             (override render height in rows)
+# v_alignment=top       (top, center, bottom)
+# h_alignment=left      (left, center, right)
 ```
 
 ## Options
