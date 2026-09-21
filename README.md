@@ -132,6 +132,11 @@ dpkg-buildpackage -us -uc -b
 sudo apt install ../fetch_*.deb
 ```
 
+Or install it with `pacstall`:
+```
+pacstall -I fetch-git
+```
+
 ### Gentoo Linux (GURU)
 Maintainer: [@Leb02](https://github.com/Leb02)
 
