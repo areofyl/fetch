@@ -898,7 +898,7 @@ enum {
 
 static int field_enabled[F_COUNT];
 static int field_order[MAX_FIELDS];
-static int field_line[F_COUNT]; // line index for each field (-1 if not shown)
+static int field_line[F_COUNT]; // first line of each field (-1 if not shown)
 static int current_field = -1;  // which field is currently being gathered
 static int field_count = 0;
 static char custom_label[MAX_CUSTOM][64];
@@ -1249,39 +1249,62 @@ static void add_line(const char *line) {
 
 static int box_width = 0; // >0 once box_wrap_lines() has run
 
-static void add_info(const char *label, const char *fmt, ...) {
+static void v_info_line(char *out, size_t outsz, const char *label,
+                        const char *fmt, va_list ap) {
   char val[MAX_LINE_LEN];
+  vsnprintf(val, sizeof(val), fmt, ap);
+  snprintf(out, outsz, "\033[1;%sm%s\033[0m: %s", label_color, label, val);
+}
+
+// Overwrite an existing row, keeping the box padding intact.
+static void write_line(int idx, const char *line) {
+  if (idx < 0 || idx >= fetch_line_count)
+    return;
+  if (box_width > 0) {
+    int w = visible_width(line);
+    int pad = box_width - w;
+    if (pad < 0) pad = 0;
+    char boxed[MAX_LINE_LEN];
+    snprintf(boxed, sizeof(boxed), "\xe2\x94\x82 %s%*s \xe2\x94\x82", line, pad,
+             "");
+    strncpy(fetch_lines[idx], boxed, MAX_LINE_LEN - 1);
+  } else {
+    strncpy(fetch_lines[idx], line, MAX_LINE_LEN - 1);
+  }
+  fetch_lines[idx][MAX_LINE_LEN - 1] = '\0';
+}
+
+static void add_info(const char *label, const char *fmt, ...) {
+  char line[MAX_LINE_LEN];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(val, sizeof(val), fmt, ap);
+  v_info_line(line, sizeof(line), label, fmt, ap);
   va_end(ap);
-
-  char line[MAX_LINE_LEN];
-  snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
-           val);
 
   // Refresh tick: replace the field's line in place. Initial pass: always
   // append a new line (so gathers that emit multiple rows, like multi-GPU,
   // don't overwrite themselves).
   if (is_refresh_pass && current_field >= 0 && field_line[current_field] >= 0) {
-    int idx = field_line[current_field];
-    if (box_width > 0) {
-      int w = visible_width(line);
-      int pad = box_width - w;
-      if (pad < 0) pad = 0;
-      char boxed[MAX_LINE_LEN];
-      snprintf(boxed, sizeof(boxed), "\xe2\x94\x82 %s%*s \xe2\x94\x82", line,
-               pad, "");
-      strncpy(fetch_lines[idx], boxed, MAX_LINE_LEN - 1);
-    } else {
-      strncpy(fetch_lines[idx], line, MAX_LINE_LEN - 1);
-    }
-    fetch_lines[idx][MAX_LINE_LEN - 1] = '\0';
+    write_line(field_line[current_field], line);
     return;
   }
-  if (current_field >= 0)
+  if (current_field >= 0 && field_line[current_field] < 0)
     field_line[current_field] = fetch_line_count;
   add_line(line);
+}
+
+// Update one specific row of a field that spans several lines, given as an
+// offset from the line the field started on (see field_line[]).
+static void update_info(int label_line, int row, const char *label,
+                        const char *fmt, ...) {
+  if (label_line < 0)
+    return;
+  char line[MAX_LINE_LEN];
+  va_list ap;
+  va_start(ap, fmt);
+  v_info_line(line, sizeof(line), label, fmt, ap);
+  va_end(ap);
+  write_line(label_line + row, line);
 }
 
 // Wrap the info lines (skipping the "user@host" title + separator) in a
@@ -2554,35 +2577,321 @@ static int amd_name_is_igpu(const char *name) {
 }
 #endif
 
-static void gather_gpu(void) {
-#ifdef __APPLE__
-  FILE *fp = popen("system_profiler SPDisplaysDataType 2>/dev/null", "r");
-  if (!fp) return;
-  char buf[512];
-  char gpu[128] = "";
-  while (fgets(buf, sizeof(buf), fp)) {
-    char *p = strstr(buf, "Chipset Model:");
-    if (!p) p = strstr(buf, "Chip:");
-    if (p) {
-      p = strchr(p, ':');
-      if (p) {
-        p++;
-        while (*p == ' ') p++;
-        int len = strlen(p);
-        while (len > 0 && (p[len-1]=='\n'||p[len-1]=='\r')) p[--len]='\0';
-        if (len > 0 && len < (int)sizeof(gpu)) { memcpy(gpu, p, len+1); break; }
-      }
+// --- GPU table ---
+// Cards are collected into a table before anything is printed, because no
+// single source sees them all. On Linux, NVIDIA's compute-only boards
+// (nvidia_drm unloaded, no monitor attached) have no cardN node at all and
+// only show up through nvidia-smi; the table lets those boards merge with —
+// or stand beside — whatever DRM found. On macOS a single
+// system_profiler run carries every card.
+
+#define MAX_GPUS 8
+
+struct gpu_info {
+  char name[160];
+  char type[16];
+  char bus[24];     // PCI slot, domains left as the source spells them
+  char dev_dir[64]; // sysfs device dir, so usage can be re-read on refresh
+  // Sizes in MiB, 0 when the source does not report that pool. GTT is the
+  // aperture onto system RAM - on an APU that is what gets allocated from.
+  unsigned long long vram, vram_used, gtt, gtt_used;
+  int live; // something reports usage, so used/total is worth showing
+};
+
+
+static struct gpu_info gpus[MAX_GPUS];
+static int gpu_count;
+
+static int gpu_add(const char *name, const char *type, const char *bus) {
+  if (gpu_count >= MAX_GPUS)
+    return -1;
+  struct gpu_info *g = &gpus[gpu_count];
+  memset(g, 0, sizeof(*g));
+  snprintf(g->name, sizeof(g->name), "%s", name);
+  snprintf(g->type, sizeof(g->type), "%s", type ? type : "");
+  snprintf(g->bus, sizeof(g->bus), "%s", bus ? bus : "");
+  return gpu_count++;
+}
+
+static char *strip_ws(char *s) {
+  while (*s == ' ' || *s == '\t')
+    s++;
+  size_t l = strlen(s);
+  while (l > 0 && (s[l - 1] == '\n' || s[l - 1] == '\r' || s[l - 1] == ' ' ||
+                   s[l - 1] == '\t'))
+    s[--l] = '\0';
+  return s;
+}
+
+static void format_mib(unsigned long long mib, char *out, size_t outsz) {
+  if (mib >= 1024)
+    snprintf(out, outsz, "%.1f GiB", mib / 1024.0);
+  else
+    snprintf(out, outsz, "%llu MiB", mib);
+}
+
+// What goes inside the parentheses: used/total per pool once a usage figure
+// is known, bare totals otherwise. Both pools get labelled, one pool not.
+static void gpu_cap(const struct gpu_info *g, char *out, size_t outsz) {
+  char vram[64] = "", gtt[64] = "";
+  const struct {
+    unsigned long long total, used;
+    char *dst;
+    size_t dstsz;
+  } pools[] = {{g->vram, g->vram_used, vram, sizeof(vram)},
+               {g->gtt, g->gtt_used, gtt, sizeof(gtt)}};
+
+  for (int p = 0; p < 2; p++) {
+    if (!pools[p].total)
+      continue;
+    char total[24];
+    format_mib(pools[p].total, total, sizeof(total));
+    if (g->live) {
+      char used[24];
+      format_mib(pools[p].used, used, sizeof(used));
+      snprintf(pools[p].dst, pools[p].dstsz, "%s/%s", used, total);
+    } else {
+      snprintf(pools[p].dst, pools[p].dstsz, "%s", total);
     }
   }
-  pclose(fp);
-  if (gpu[0])
-    add_info("GPU", "%s", gpu);
-#else
-  DIR *d = opendir("/sys/class/drm");
-  if (!d)
+
+  if (vram[0] && gtt[0])
+    snprintf(out, outsz, "VRAM %s, GTT %s", vram, gtt);
+  else if (vram[0])
+    snprintf(out, outsz, "%s", vram);
+  else if (gtt[0])
+    snprintf(out, outsz, "GTT %s", gtt);
+  else
+    out[0] = '\0';
+}
+
+// Print one GPU row: appended on the initial pass, rewritten in place on a
+// refresh tick (the rows are consecutive, so the offset from the field's
+// first row identifies this one).
+static void gpu_report(int i) {
+  const struct gpu_info *g = &gpus[i];
+  char cap[160], msg[MAX_LINE_LEN];
+  gpu_cap(g, cap, sizeof(cap));
+
+  if (cap[0] && g->type[0])
+    snprintf(msg, sizeof(msg), "%s [%s] (%s)", g->name, g->type, cap);
+  else if (cap[0])
+    snprintf(msg, sizeof(msg), "%s (%s)", g->name, cap);
+  else if (g->type[0])
+    snprintf(msg, sizeof(msg), "%s [%s]", g->name, g->type);
+  else
+    snprintf(msg, sizeof(msg), "%s", g->name);
+
+  if (is_refresh_pass)
+    update_info(field_line[F_GPU], i, "GPU", "%s", msg);
+  else
+    add_info("GPU", "%s", msg);
+}
+
+#ifndef __APPLE__
+static const char *busid_tail(const char *in) {
+  const char *c = strchr(in, ':');
+  return c ? c + 1 : in;
+}
+
+// PCI bus ids are hex, but sysfs and nvidia-smi don't agree on case.
+static int str_ieq(const char *a, const char *b) {
+  while (*a && *b) {
+    if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+      return 0;
+    a++;
+    b++;
+  }
+  return *a == *b;
+}
+
+static struct gpu_info *gpu_find(const char *bus) {
+  const char *tail = busid_tail(bus);
+  if (!tail[0])
+    return NULL;
+  for (int i = 0; i < gpu_count; i++)
+    if (gpus[i].bus[0] && str_ieq(busid_tail(gpus[i].bus), tail))
+      return &gpus[i];
+  return NULL;
+}
+
+static unsigned long long read_ull(const char *path) {
+  FILE *fp = fopen(path, "r");
+  if (!fp)
+    return 0;
+  char buf[64] = "";
+  if (!fgets(buf, sizeof(buf), fp))
+    buf[0] = '\0';
+  fclose(fp);
+  return strtoull(buf, NULL, 10);
+}
+
+// Only usage moves, so this is all the refresh tick has to re-read.
+static void gpu_used_sysfs(struct gpu_info *g) {
+  char path[256];
+  if (!g->dev_dir[0])
     return;
+  if (g->vram) {
+    snprintf(path, sizeof(path), "%s/mem_info_vram_used", g->dev_dir);
+    g->vram_used = read_ull(path) / 1048576;
+  }
+  if (g->gtt) {
+    snprintf(path, sizeof(path), "%s/mem_info_gtt_used", g->dev_dir);
+    g->gtt_used = read_ull(path) / 1048576;
+  }
+}
+
+// amdgpu/radeon expose their memory through sysfs. VRAM is the card's own
+// memory — on an APU just the carve-out — while GTT is the aperture onto
+// system RAM, which is where an APU actually allocates from.
+static void gpu_mem_sysfs(struct gpu_info *g, const char *dev_dir) {
+  char path[256];
+  snprintf(g->dev_dir, sizeof(g->dev_dir), "%s", dev_dir);
+  snprintf(path, sizeof(path), "%s/mem_info_vram_total", dev_dir);
+  g->vram = read_ull(path) / 1048576;
+  snprintf(path, sizeof(path), "%s/mem_info_gtt_total", dev_dir);
+  g->gtt = read_ull(path) / 1048576;
+  g->live = g->vram || g->gtt;
+  gpu_used_sysfs(g);
+}
+
+// nvidia-smi is a subprocess, so its rows are refreshed every Nth tick
+// instead of every second.
+#define GPU_NVIDIA_TICKS 5
+static int gpu_has_nvidia;
+static int gpu_nvidia_tick;
+
+// Everything NVIDIA, whether or not a DRM node exists for it.
+static void gpu_nvidia(void) {
+  FILE *fp = popen(
+      "nvidia-smi --query-gpu=pci.bus_id,name,memory.total,memory.used "
+      "--format=csv,noheader,nounits 2>/dev/null",
+      "r");
+  if (!fp)
+    return;
+  char line[256];
+  while (fgets(line, sizeof(line), fp)) {
+    char *comma = strchr(line, ',');
+    if (!comma)
+      continue;
+    *comma++ = '\0';
+    char *name = strip_ws(comma);
+    comma = strchr(name, ',');
+    if (!comma)
+      continue;
+    *comma++ = '\0';
+    unsigned long long total = strtoull(comma, NULL, 10);
+    comma = strchr(comma, ',');
+    if (!comma)
+      continue;
+    *comma++ = '\0';
+    unsigned long long used = strtoull(comma, NULL, 10);
+    const char *bus = strip_ws(line);
+    if (!name[0] || !total)
+      continue; // malformed line
+    struct gpu_info *g = gpu_find(bus);
+    if (!g) {
+      // A board appearing mid-animation is not worth reflowing the output.
+      if (is_refresh_pass)
+        continue;
+      if (gpu_add(name, "Discrete", bus) < 0)
+        continue;
+      g = &gpus[gpu_count - 1];
+    } else {
+      // nvidia-smi's name carries the vendor prefix lspci leaves out.
+      snprintf(g->name, sizeof(g->name), "%s", name);
+    }
+    g->vram = total;
+    g->vram_used = used;
+    g->live = 1;
+    gpu_has_nvidia = 1;
+  }
+  pclose(fp);
+}
+
+// Refresh tick: re-read what changes, leave names, totals and rows alone.
+static void gpu_refresh(void) {
+  int redraw = 0;
+  for (int i = 0; i < gpu_count; i++)
+    if (gpus[i].dev_dir[0]) {
+      gpu_used_sysfs(&gpus[i]);
+      redraw = 1;
+    }
+  gpu_nvidia_tick = (gpu_nvidia_tick + 1) % GPU_NVIDIA_TICKS;
+  if (gpu_has_nvidia && gpu_nvidia_tick == 0) {
+    gpu_nvidia();
+    redraw = 1;
+  }
+  if (redraw)
+    for (int i = 0; i < gpu_count; i++)
+      gpu_report(i);
+}
+#endif
+
+#ifdef __APPLE__
+// system_profiler prints "VRAM (Total): 1536 MB" on cards that have their own
+// memory; Apple Silicon GPUs have none and omit the key entirely.
+static unsigned long long gpu_vram_profiler(const char *val) {
+  unsigned long long n = strtoull(val, NULL, 10);
+  if (!n)
+    return 0;
+  unsigned long long mib = 0;
+  for (const char *p = val; *p; p++) {
+    char c = (char)tolower((unsigned char)*p);
+    if (c == 't')
+      mib = n * 1024 * 1024;
+    else if (c == 'g')
+      mib = n * 1024;
+    else if (c == 'm')
+      mib = n;
+    else if (c == 'k')
+      mib = n / 1024;
+  }
+  return mib;
+}
+#endif
+
+static void gather_gpu(void) {
+#ifdef __APPLE__
+  // No usage figures to poll, and re-running system_profiler every second
+  // would cost more than the animation itself.
+  if (is_refresh_pass)
+    return;
+  gpu_count = 0;
+  FILE *fp = popen("system_profiler SPDisplaysDataType 2>/dev/null", "r");
+  if (!fp)
+    return;
+  char buf[512];
+  while (fgets(buf, sizeof(buf), fp)) {
+    char *p = strstr(buf, "Chipset Model:");
+    const char *key = "Chipset Model:";
+    if (!p) {
+      p = strstr(buf, "Chip:");
+      key = "Chip:";
+    }
+    if (p) {
+      char *v = strip_ws(p + strlen(key));
+      if (*v)
+        gpu_add(v, "", "");
+      continue;
+    }
+    p = strstr(buf, "VRAM (Total):");
+    if (p && gpu_count > 0)
+      gpus[gpu_count - 1].vram =
+          gpu_vram_profiler(strip_ws(p + strlen("VRAM (Total):")));
+  }
+  pclose(fp);
+#else
+  if (is_refresh_pass) {
+    gpu_refresh();
+    return;
+  }
+  gpu_count = 0;
+  gpu_has_nvidia = 0;
+  DIR *d = opendir("/sys/class/drm");
   struct dirent *ent;
-  while ((ent = readdir(d))) {
+  // No /sys/class/drm at all is fine — NVIDIA-only boxes still get listed.
+  while (d && (ent = readdir(d))) {
     // Only cardN (not cardN-CONNECTOR or renderD*)
     if (strncmp(ent->d_name, "card", 4) != 0)
       continue;
@@ -2602,7 +2911,7 @@ static void gather_gpu(void) {
     FILE *fp = fopen(path, "r");
     if (!fp)
       continue;
-    char driver[32] = "", pci_id[16] = "", compat[64] = "";
+    char driver[32] = "", pci_id[16] = "", compat[64] = "", slot[32] = "";
     char buf[256];
     while (fgets(buf, sizeof(buf), fp)) {
       if (strncmp(buf, "DRIVER=", 7) == 0) {
@@ -2611,6 +2920,12 @@ static void gather_gpu(void) {
         while (l > 0 && (v[l - 1] == '\n' || v[l - 1] == '\r'))
           v[--l] = '\0';
         strncpy(driver, v, sizeof(driver) - 1);
+      } else if (strncmp(buf, "PCI_SLOT_NAME=", 14) == 0) {
+        char *v = buf + 14;
+        int l = strlen(v);
+        while (l > 0 && (v[l - 1] == '\n' || v[l - 1] == '\r'))
+          v[--l] = '\0';
+        strncpy(slot, v, sizeof(slot) - 1);
       } else if (strncmp(buf, "PCI_ID=", 7) == 0) {
         char *v = buf + 7;
         int l = strlen(v);
@@ -2680,13 +2995,20 @@ static void gather_gpu(void) {
 
     if (!name[0])
       continue;
-    if (type[0])
-      add_info("GPU", "%s [%s]", name, type);
-    else
-      add_info("GPU", "%s", name);
+    int idx = gpu_add(name, type, slot);
+    if (idx < 0)
+      break;
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/device", ent->d_name);
+    gpu_mem_sysfs(&gpus[idx], path);
   }
-  closedir(d);
+  if (d)
+    closedir(d);
+
+  gpu_nvidia();
 #endif
+
+  for (int i = 0; i < gpu_count; i++)
+    gpu_report(i);
 }
 
 static void gather_memory(void) {
@@ -4510,9 +4832,10 @@ int main(int argc, char **argv) {
       }
     }
     // Refresh fast dynamic fields every ~1 second (20 frames).
-    // Only uptime/memory/swap — they're pure /proc reads, no popen,
-    // so they don't hitch the animation. Battery/disk/ip use popen and
-    // stay static (user can restart to refresh those).
+    // Uptime/memory/swap are pure /proc reads, no popen, so they don't hitch
+    // the animation. GPU usage is sysfs too; its one subprocess
+    // (nvidia-smi, ~25 ms per call on a two-board box) only runs every 5th
+    // tick. Battery/disk/ip use popen and stay static (restart to refresh).
     if (show_info && frame > 0 && frame % 20 == 0) {
       is_refresh_pass = 1;
       if (field_line[F_UPTIME] >= 0) {
@@ -4526,6 +4849,10 @@ int main(int argc, char **argv) {
       if (field_line[F_SWAP] >= 0) {
         current_field = F_SWAP;
         gather_swap();
+      }
+      if (field_line[F_GPU] >= 0) {
+        current_field = F_GPU;
+        gather_gpu();
       }
       current_field = -1;
       is_refresh_pass = 0;

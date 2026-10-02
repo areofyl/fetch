@@ -195,14 +195,14 @@ All system info is gathered natively. No fastfetch or neofetch needed:
 - **Theme/Icons/Font** - `~/.config/gtk-3.0/settings.ini`, `~/.gtkrc-2.0`, and Qt (`qt6ct`/`qt5ct`, `~/.config/kdeglobals`) on Linux, `defaults read` (macOS)
 - **Cursor** - `~/.config/gtk-3.0/settings.ini` (Linux only)
 - **CPU** - `/proc/cpuinfo`, device-tree (Apple Silicon), or `sysctl` (macOS)
-- **GPU** - DRM + `lspci` for full names (Linux), `system_profiler` (macOS)
+- **GPU** - every GPU, not just the one driving a monitor: on Linux DRM + `lspci` for names, memory from sysfs (amdgpu VRAM, plus the GTT aperture onto system RAM - that's what APUs actually allocate from) and `nvidia-smi` (also catches headless NVIDIA compute cards, which have no DRM node at all); on macOS `system_profiler`, with VRAM where the OS reports it — Apple Silicon GPUs have unified memory and no VRAM of their own
 - **Memory/Swap** - `/proc/meminfo` (Linux), `vm_stat` (macOS)
 - **Disk** - `statvfs()` + `/proc/mounts` (Linux), `getmntinfo` (macOS) – supports multiple mount points via config
 - **Battery** - `energy_now/energy_full` plus `model_name` (Linux), IOKit (macOS)
 - **Power Profile** - `/sys/firmware/acpi/platform_profile`, fallback `powerprofilesctl get 2>/dev/null` (Linux)
 - **Local IP** - `getifaddrs()`
 
-Stats like memory, battery, and uptime update in real-time while the logo spins.
+Stats like memory, swap, uptime and per-GPU memory usage update in real-time while the logo spins.
 
 ## Config
 
