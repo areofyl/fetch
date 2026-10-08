@@ -6,8 +6,9 @@ A donut.c-inspired fetch tool that spins your distro logo in 3D with live-updati
 
 Takes any ASCII/Unicode distro logo, turns each character into a point cloud
 based on its visual density, and renders it as a rotating 3D relief with
-Blinn-Phong shading. System info is gathered natively with no external
-dependencies. Works on Linux and macOS.
+Blinn-Phong shading. System info is gathered natively on Linux and macOS.
+The native Windows build uses Fastfetch for static system info and Windows APIs
+for live memory and uptime.
 
 Based on [gentoo.c](https://github.com/areofyl/gentoo.c).
 
@@ -17,6 +18,15 @@ Based on [gentoo.c](https://github.com/areofyl/gentoo.c).
 make
 ./fetch
 ```
+
+On Windows 11, use PowerShell and an unpacked LLVM/MinGW UCRT toolchain:
+
+```powershell
+.\build.ps1 -Compiler C:\tools\llvm-mingw\bin\clang.exe
+.\fetch.exe
+```
+
+See [Windows build, configuration, and behavior](docs/windows.md).
 
 Press any key to stop. The keypress passes through to the shell, so it
 works as a startup fetch. Ctrl-C works too (but is less cool). Click and

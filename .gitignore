@@ -1,4 +1,9 @@
 fetch
+fetch.exe
+.tools/
+tests/*.exe
+tests/.work/
+fetch-linux
 debian/files
 debian/.debhelper/
 debian/fetch/

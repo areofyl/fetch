@@ -22,4 +22,7 @@ install: fetch
 clean:
 	rm -f fetch
 
-.PHONY: install clean
+test: fetch
+	python3 tests/posix.py
+
+.PHONY: install clean test

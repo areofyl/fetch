@@ -2,6 +2,9 @@
 
 fetch is configured through `~/.config/fetch/config`. If the file doesn't exist, all fields are shown in the default order.
 
+On Windows, use `%APPDATA%\fetch\config` instead. Save it as UTF-8; a UTF-8 BOM is accepted.
+See [Windows field differences and build instructions](windows.md).
+
 ## Fields
 
 List field names one per line to show them, in the order you want. Comment out or remove fields to hide them. If a config file exists, only the fields listed in it are shown.

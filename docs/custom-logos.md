@@ -4,6 +4,9 @@
 
 Create `~/.config/fetch/logo.txt` with your ASCII/Unicode art. fetch will use it instead of detecting your distro.
 
+On Windows, use `%APPDATA%\fetch\logo.txt`, saved as UTF-8. Paths containing
+spaces and Unicode characters and files with a UTF-8 BOM are supported.
+
 ## Distro color scheme
 
 Add `# distro: <name>` as the first line to use that distro's color scheme:
