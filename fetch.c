@@ -4560,9 +4560,9 @@ int main(int argc, char **argv) {
       }
     }
     // Refresh fast dynamic fields every ~1 second (20 frames).
-    // Only uptime/memory/swap — they're pure /proc reads, no popen,
-    // so they don't hitch the animation. Battery/disk/ip use popen and
-    // stay static (user can restart to refresh those).
+    // Only uptime/memory/swap/battery — they're pure /proc and /sys
+    // reads, no popen, so they don't hitch the animation. Disk/ip use
+    // popen and stay static (user can restart to refresh those).
     if (show_info && frame > 0 && frame % 20 == 0) {
       is_refresh_pass = 1;
       if (field_line[F_UPTIME] >= 0) {
@@ -4576,6 +4576,10 @@ int main(int argc, char **argv) {
       if (field_line[F_SWAP] >= 0) {
         current_field = F_SWAP;
         gather_swap();
+      }
+      if (field_line[F_BATTERY] >= 0) {
+        current_field = F_BATTERY;
+        gather_battery();
       }
       current_field = -1;
       is_refresh_pass = 0;
