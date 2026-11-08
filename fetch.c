@@ -15,6 +15,7 @@
 #include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 #include <time.h>
@@ -616,12 +617,38 @@ static int is_cursor_escape(const char *p) {
 
 // Try loading a logo from fastfetch colored output
 static int load_logo_ff_colored(const char *name) {
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd),
-           "fastfetch -c none -l %s -s break --pipe false 2>/dev/null", name);
-  FILE *fp = popen(cmd, "r");
-  if (!fp)
+  int output[2];
+  if (pipe(output) < 0)
     return 0;
+  FILE *fp = fdopen(output[0], "r");
+  if (!fp) {
+    close(output[0]);
+    close(output[1]);
+    return 0;
+  }
+  pid_t pid = fork();
+  if (pid < 0) {
+    fclose(fp);
+    close(output[1]);
+    return 0;
+  }
+  if (pid == 0) {
+    close(output[0]);
+    if (dup2(output[1], STDOUT_FILENO) < 0)
+      _exit(127);
+    if (output[1] != STDOUT_FILENO)
+      close(output[1]);
+    int null_fd = open("/dev/null", O_WRONLY);
+    if (null_fd < 0 || dup2(null_fd, STDERR_FILENO) < 0)
+      _exit(127);
+    if (null_fd != STDERR_FILENO)
+      close(null_fd);
+    char *const args[] = {"fastfetch", "-c", "none", "-l", (char *)name,
+                          "-s", "break", "--pipe", "false", NULL};
+    execvp(args[0], args);
+    _exit(127);
+  }
+  close(output[1]);
 
   char buf[512];
   while (logo_rows < MAX_LOGO_ROWS && fgets(buf, sizeof(buf), fp)) {
@@ -663,7 +690,8 @@ static int load_logo_ff_colored(const char *name) {
     memcpy(logo_data[logo_rows], buf, len + 1);
     logo_rows++;
   }
-  pclose(fp);
+  fclose(fp);
+  while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
 
   while (logo_rows > 0 && logo_data[logo_rows - 1][0] == '\0')
     logo_rows--;
