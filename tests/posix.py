@@ -1,6 +1,8 @@
 import os
+import json
 import platform
 import re
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,10 +13,12 @@ EXECUTABLE = Path(__file__).resolve().parents[1] / "fetch"
 
 
 class FetchTests(unittest.TestCase):
-    def run_fetch(self, args, home=None):
+    def run_fetch(self, args, home=None, env_overrides=None):
         env = os.environ.copy()
         if home:
             env["HOME"] = str(home)
+        if env_overrides:
+            env.update(env_overrides)
         return subprocess.run(
             [str(EXECUTABLE), *args], env=env, capture_output=True, timeout=10
         )
@@ -22,6 +26,62 @@ class FetchTests(unittest.TestCase):
     def test_help_and_version(self):
         self.assertIn(b"Usage:", self.run_fetch(["--help"]).stdout)
         self.assertIn(platform.system().encode(), self.run_fetch(["--version"]).stdout)
+
+    def test_logo_arguments_without_shell(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            stub = home / "fastfetch"
+            log = home / "arguments.jsonl"
+            marker = home / "injected"
+            stub.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "with open(os.environ['FETCH_TEST_LOG'], 'a') as log:\n"
+                "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "if '--print-logos' in sys.argv:\n"
+                "    print('gentoo:\\n@@@')\n"
+                "elif os.environ['FETCH_TEST_MODE'] == 'colored':\n"
+                "    print('@@@')\n"
+                "elif os.environ['FETCH_TEST_MODE'] == 'large':\n"
+                "    print('@@@\\n' * 2000)\n"
+                "print('suppressed stderr', file=sys.stderr)\n"
+            )
+            stub.chmod(0o755)
+            env = {"PATH": str(home), "FETCH_TEST_LOG": str(log),
+                   "FETCH_TEST_MODE": "colored"}
+            for name in ["gentoo", "name with spaces", "name'with\"quotes",
+                         "x" * 300,
+                         f"gentoo; printf injected > {marker}; #",
+                         f"$(printf injected > {marker})",
+                         f"`printf injected > {marker}`"]:
+                with self.subTest(name=name):
+                    log.unlink(missing_ok=True)
+                    result = self.run_fetch(
+                        ["--logo", name, "--no-info", "--frames", "1"], home, env
+                    )
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, b"")
+                    self.assertFalse(marker.exists())
+                    self.assertEqual(
+                        [json.loads(line) for line in log.read_text().splitlines()],
+                        [["-c", "none", "-l", name, "-s", "break", "--pipe", "false"]],
+                    )
+            for mode in ["fallback", "large", "missing"]:
+                with self.subTest(mode=mode):
+                    log.unlink(missing_ok=True)
+                    env["FETCH_TEST_MODE"] = mode
+                    if mode == "missing":
+                        stub.unlink()
+                    result = self.run_fetch(
+                        ["--logo", "gentoo", "--no-info", "--frames", "1"], home, env
+                    )
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, b"")
+                    self.assertTrue(result.stdout)
+                    if mode == "fallback":
+                        calls = [json.loads(line) for line in log.read_text().splitlines()]
+                        self.assertEqual(len(calls), 2)
+                        self.assertEqual(calls[1], ["-c", "none", "--print-logos"])
 
     def test_invalid_arguments(self):
         for args in [
