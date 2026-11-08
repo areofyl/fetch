@@ -52,6 +52,36 @@ static void test_info_bounds(void) {
   box_width = 0;
 }
 
+static void test_box_without_title(void) {
+  config_show_title = 0;
+  fetch_line_count = 0;
+  for (int i = 0; i < F_COUNT; i++) field_line[i] = -1;
+  current_field = F_UPTIME;
+  add_info("Uptime", "initial");
+  current_field = F_MEMORY;
+  add_info("Memory", "initial");
+  current_field = -1;
+
+  box_wrap_lines();
+  CHECK(fetch_line_count == 4);
+  CHECK(strstr(fetch_lines[0], "╭") == fetch_lines[0]);
+  CHECK(strstr(fetch_lines[3], "╰") == fetch_lines[3]);
+  CHECK(field_line[F_UPTIME] == 1);
+  CHECK(field_line[F_MEMORY] == 2);
+  CHECK(strstr(fetch_lines[1], "Uptime") != NULL);
+  CHECK(strstr(fetch_lines[2], "Memory") != NULL);
+
+  is_refresh_pass = 1;
+  current_field = F_UPTIME;
+  add_info("Uptime", "updated");
+  CHECK(strstr(fetch_lines[1], "updated") != NULL);
+  CHECK(visible_width(fetch_lines[1]) == box_width + 4);
+  is_refresh_pass = 0;
+  current_field = -1;
+  box_width = 0;
+  config_show_title = 1;
+}
+
 static void test_minimal_logos(void) {
   for (int shape = 0; shape < 3; shape++) {
     logo_rows = shape == 2 ? 3 : 1;
@@ -71,6 +101,7 @@ static void test_minimal_logos(void) {
 
 int main(void) {
   test_info_bounds();
+  test_box_without_title();
   test_minimal_logos();
   printf("Shared unit tests: %s\n", failures ? "FAILED" : "passed");
   return failures ? 1 : 0;
