@@ -943,6 +943,7 @@ static int config_speed_set = 0;
 static int config_spin_x = -1;    // -1 = use flag/default
 static int config_spin_y = -1;
 static int config_box = 0;        // 0 = off (default), 1 = on
+static int config_show_title = 1;
 static char config_shading[128] = "";
 static char config_shading_mode[16] = "";
 static char config_separator[8] = "-";
@@ -1077,6 +1078,13 @@ static void load_config(void) {
       strip_inline_hint(val);
       config_spin_x = (strchr(val, 'x') || strchr(val, 'X')) ? 1 : 0;
       config_spin_y = (strchr(val, 'y') || strchr(val, 'Y')) ? 1 : 0;
+      continue;
+    }
+    if (strncmp(line, "show_title=", 11) == 0) {
+      char *val = line + 11;
+      strip_inline_hint(val);
+      config_show_title = (strcmp(val, "1") == 0 || strcasecmp(val, "y") == 0 ||
+                           strcasecmp(val, "yes") == 0 || strcasecmp(val, "true") == 0);
       continue;
     }
     if (strncmp(line, "box=", 4) == 0) {
@@ -1315,7 +1323,7 @@ static void add_info(const char *label, const char *fmt, ...) {
 // gather_*() calls, and shifts field_line[] so later live-refresh writes
 // (see add_info above) land on the right row.
 static void box_wrap_lines(void) {
-  int start = 2; // 0 = title, 1 = separator underline
+  int start = config_show_title ? 2 : 0;
   if (start >= fetch_line_count)
     return;
 
@@ -4154,6 +4162,7 @@ int main(int argc, char **argv) {
           "blue,\n"
           "                             magenta, cyan, white, or ANSI number)\n"
           "    separator=<char>         Title separator character\n"
+          "    show_title=<0/1>         Show user@host and underline (default 1)\n"
           "    shading_mode=<mode>      ascii (default), blocks or sextants\n"
           "    shading=<str>            Shading ramp characters\n"
           "    light=<dir>              Light direction (top-left, top-right, "
@@ -4367,7 +4376,8 @@ int main(int argc, char **argv) {
     field_line[i] = -1;
 
   if (show_info) {
-    gather_title();
+    if (config_show_title)
+      gather_title();
     for (int i = 0; i < field_count; i++) {
       int id = field_order[i];
       if (id == F_SEPARATOR) {
