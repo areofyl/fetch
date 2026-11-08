@@ -1,5 +1,6 @@
 import os
 import platform
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -35,6 +36,31 @@ class FetchTests(unittest.TestCase):
                 result = self.run_fetch(args)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertTrue(result.stderr)
+
+    def test_show_title(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "logo.txt").write_text("  XX  \nXXXXXX\n  XX  \n")
+            config = config_dir / "config"
+            for value in [None, "1", "yes", "true", "0", "no", "false", "0 (hide title)"]:
+                for box in [0, 1]:
+                    with self.subTest(value=value, box=box):
+                        settings = f"box={box}\nseparator=~\ncustom_Test=visible\n"
+                        if value is not None:
+                            settings += f"show_title={value}\n"
+                        config.write_text(settings)
+                        result = self.run_fetch(
+                            ["--frames", "1", "--height", "20", "--shading-chars", "X"], home
+                        )
+                        self.assertEqual(result.returncode, 0)
+                        output = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", result.stdout)
+                        shown = value in [None, "1", "yes", "true"]
+                        self.assertEqual(b"@" in output, shown)
+                        self.assertEqual(b"~~" in output, shown)
+                        self.assertIn(b"Test: visible", output)
+                        self.assertEqual("╭".encode() in output, bool(box))
 
     def test_shading_and_cli_precedence(self):
         with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
