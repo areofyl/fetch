@@ -62,6 +62,13 @@ These render like built-in fields (`Pronouns: he/him`) with the configured label
 ## Appearance
 
 ```
+show_title=0
+```
+
+Hide the `user@host` title and its underline. Default is `1` (shown).
+Also accepts `yes`/`no`/`true`/`false`.
+
+```
 label_color=magenta
 ```
 
