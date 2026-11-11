@@ -1,5 +1,5 @@
 # fetch
-![GitHub license](https://img.shields.io/github/license/areofyl/fetch) ![fetch.c size](https://img.shields.io/github/size/areofyl/fetch/fetch.c?label=fetch.c) ![GitHub Release](https://img.shields.io/github/v/release/areofyl/fetch?label=latest) ![GitHub stars](https://img.shields.io/github/stars/areofyl/fetch) 
+![GitHub license](https://img.shields.io/github/license/areofyl/fetch?color=blue) ![fetch.c size](https://img.shields.io/github/size/areofyl/fetch/fetch.c?label=fetch.c) ![GitHub Release](https://img.shields.io/github/v/release/areofyl/fetch?label=latest) ![GitHub stars](https://img.shields.io/github/stars/areofyl/fetch) 
 
 A donut.c-inspired fetch tool that spins your distro logo in 3D with live-updating system info.
 
@@ -115,7 +115,7 @@ sudo zypper install ~/rpmbuild/RPMS/*/fetch-*.rpm
 ```
 
 ### Ubuntu / Debian
-![Pacstall Maintainer](https://img.shields.io/badge/Maintainer-RealOrangeKun-red?logo=debian&logoColor=white&color=CE0056) [![Pacstall](https://repology.org/badge/version-for-repo/pacstall/fetch-unclassified.svg?header=Pacstall)](https://pacstall.dev/packages/fetch-git)
+[![Pacstall Maintainer](https://img.shields.io/badge/Maintainer-RealOrangeKun-red?logo=debian&logoColor=white&color=CE0056)](https://github.com/RealOrangeKun) [![Pacstall](https://repology.org/badge/version-for-repo/pacstall/fetch-unclassified.svg?header=Pacstall)](https://pacstall.dev/packages/fetch-git)
 
 You can install `fetch` from the PPA:
 
