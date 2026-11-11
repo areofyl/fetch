@@ -1,4 +1,5 @@
 # fetch
+![GitHub license](https://img.shields.io/github/license/areofyl/fetch) ![fetch.c size](https://img.shields.io/github/size/areofyl/fetch/fetch.c?label=fetch.c) ![GitHub Release](https://img.shields.io/github/v/release/areofyl/fetch?label=latest) ![GitHub stars](https://img.shields.io/github/stars/areofyl/fetch) 
 
 A donut.c-inspired fetch tool that spins your distro logo in 3D with live-updating system info.
 
@@ -34,7 +35,7 @@ sudo make install
 <summary><h2>Package managers</h2></summary>
 
 ### Arch Linux (AUR)
-Maintainer: [@PlayRood32](https://github.com/PlayRood32)
+[![AUR Maintainer](https://img.shields.io/aur/maintainer/fetch-git?logo=archlinux&label=Maintainer&logoColor=white)](https://github.com/PlayRood32) [![AUR Version](https://img.shields.io/aur/version/FETCH-GIT?label=AUR)](https://aur.archlinux.org/packages/fetch-git) [![AUR Last Modified](https://img.shields.io/aur/last-modified/fetch-git?label=Last%20Modified)](https://aur.archlinux.org/packages/fetch-git) 
 
 You can install `fetch-git` from the AUR using your favorite AUR helper:
 
@@ -49,7 +50,7 @@ paru -S fetch-git
 *The `fetch-git` AUR package was not compromised in the AUR package hack. It is maintained and up to date.*
 
 ### Nix
-Maintainer: [@Ghastrum](https://github.com/Ghastrum)
+[![NixOS Maintainer](https://img.shields.io/badge/Maintainer-Ghastrum-blue?logo=nixos&logoColor=white)](https://github.com/Ghastrum) [![nixpkgs](https://repology.org/badge/version-for-repo/nix_unstable/fetch-unclassified.svg?header=nixpkgs%20unstable)](https://repology.org/project/fetch-unclassified/versions)
 
 Fetch is available in **[nixpkgs unstable](https://search.nixos.org/packages?channel=unstable&query=fetch#show=fetch)**, or as a [flake](https://github.com/areofyl/fetch/tree/main/nix).
 
@@ -69,7 +70,7 @@ environment.systemPackages = [
 ```
 
 ### Homebrew (macOS)
-Maintainer: [@areofyl](https://github.com/areofyl)
+[![Homebrew Maintainer](https://img.shields.io/badge/Maintainer-areofyl-blue?logo=homebrew&logoColor=white&color=darkgoldenrod)](https://github.com/areofyl)
 
 ```bash
 brew tap areofyl/fetch
@@ -77,7 +78,7 @@ brew install fetch-git
 ```
 
 ### Fedora Linux
-Maintainer: [@RealOrangeKun](https://github.com/RealOrangeKun)
+[![Fedora Maintainer](https://img.shields.io/badge/Maintainer-RealOrangeKun-blue?logo=fedora&logoColor=white&color=0B57A4)](https://github.com/RealOrangeKun) [![Copr Build](https://img.shields.io/copr/build/realorangekun/fetch/fetch?label=COPR%20Build)](https://copr.fedorainfracloud.org/coprs/realorangekun/fetch/packages/)
 
 You can install `fetch` from COPR:
 
@@ -95,7 +96,7 @@ sudo dnf install ~/rpmbuild/RPMS/*/fetch-*.rpm
 ```
 
 ### openSUSE
-Maintainer: [@RealOrangeKun](https://github.com/RealOrangeKun)
+[![openSUSE Maintainer](https://img.shields.io/badge/Maintainer-RealOrangeKun-blue?logo=opensuse&logoColor=white&color=73ba25)](https://github.com/RealOrangeKun) [![OBS](https://img.shields.io/obs/home:RealOrangeKun/fetch/openSUSE_Tumbleweed/x86_64?label=OBS%20Build)](https://build.opensuse.org/package/revisions/home:RealOrangeKun/fetch)
 
 You can install `fetch` from the Open Build Service:
 
@@ -114,7 +115,7 @@ sudo zypper install ~/rpmbuild/RPMS/*/fetch-*.rpm
 ```
 
 ### Ubuntu / Debian
-Maintainer: [@RealOrangeKun](https://github.com/RealOrangeKun)
+![Pacstall Maintainer](https://img.shields.io/badge/Maintainer-RealOrangeKun-red?logo=debian&logoColor=white&color=CE0056) [![Pacstall](https://repology.org/badge/version-for-repo/pacstall/fetch-unclassified.svg?header=Pacstall)](https://pacstall.dev/packages/fetch-git)
 
 You can install `fetch` from the PPA:
 
@@ -138,7 +139,7 @@ pacstall -I fetch-git
 ```
 
 ### Gentoo Linux (GURU)
-Maintainer: [@Leb02](https://github.com/Leb02)
+[![Gentoo Maintainer](https://img.shields.io/badge/Maintainer-Leb02-blue?logo=gentoo&logoColor=white&color=483D8B)](https://github.com/Leb02) [![Gentoo overlay GURU](https://repology.org/badge/version-for-repo/gentoo_ovl_guru/fetch-unclassified.svg?header=Gentoo%20overlay%20GURU)](https://repology.org/project/fetch-unclassified/versions)
 
 You can install `fetch` from the GURU repository using:
 
