@@ -286,7 +286,6 @@ colors
 | `--no-info` | Just the logo, no system info |
 | `--no-color` | Disable coloring |
 | `--frames <n>` | Stop after n frames |
-| `--infinite` | Run forever |
 | `--shading-mode <mode>` | `ascii` (default), or opt into sub-cell blocks with `sextants` (2x3) or `blocks` (2x2) |
 | `--shading-chars <str>` | Custom shading ramp, supports UTF-8 |
 | `-h`, `--help` | Show help |

@@ -4129,7 +4129,7 @@ int main(int argc, char **argv) {
   float speed = 1.0f;
   int show_info = 1;
   int use_color = 1;
-  int max_frames = 2000;
+  int max_frames = 0;
   const char *shading = NULL;
   const char *shading_mode = NULL;
   int box_flag = 0;
@@ -4161,7 +4161,6 @@ int main(int argc, char **argv) {
           "  --no-info                 Just the logo, no system info\n"
           "  --no-color                Disable logo coloring\n"
           "  --frames <n>              Stop after n frames (default 2000)\n"
-          "  --infinite                Run forever (keypress or Ctrl-C to "
           "exit)\n"
           "  --shading-mode <mode>     ascii (.,-~:;=!*#$@, the default), or "
           "opt into\n"
@@ -4245,8 +4244,6 @@ int main(int argc, char **argv) {
       const char *option = argv[i];
       if (!parse_integer(option, argv[++i], 0, INT_MAX, &max_frames))
         return 1;
-    } else if (strcmp(argv[i], "--infinite") == 0) {
-      max_frames = 0;
     } else if (strcmp(argv[i], "--shading-chars") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
