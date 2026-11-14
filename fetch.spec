@@ -1,3 +1,6 @@
+# Commit for v2.3.0; keep in sync with _service when updating the release.
+%global commit 9c8bb96bf47460b7c73c9e3423f8d073a67222d3
+
 Name:           fetch
 Version:        2.3.0
 Release:        1.%(date +%%Y%%m%%d)%{?dist}
@@ -5,7 +8,7 @@ Summary:        Animated 3D fetch tool for your terminal
 
 License:        ISC
 URL:            https://github.com/areofyl/fetch
-Source0:        %{url}/archive/refs/heads/main.tar.gz#/fetch-%{version}.tar.gz
+Source0:        %{url}/archive/%{commit}.tar.gz#/fetch-%{version}.tar.gz
 
 BuildRequires:  gcc
 BuildRequires:  make
@@ -18,7 +21,7 @@ Blinn-Phong shading. System info is gathered natively from /proc, /sys, and GTK
 config — no external dependencies required.
 
 %prep
-%autosetup -n fetch-main
+%autosetup -n fetch-%{commit}
 
 %build
 %make_build

@@ -13,14 +13,15 @@ EXECUTABLE = Path(__file__).resolve().parents[1] / "fetch"
 
 
 class FetchTests(unittest.TestCase):
-    def run_fetch(self, args, home=None, env_overrides=None):
+    def run_fetch(self, args, home=None, env_overrides=None, input_data=None):
         env = os.environ.copy()
         if home:
             env["HOME"] = str(home)
         if env_overrides:
             env.update(env_overrides)
         return subprocess.run(
-            [str(EXECUTABLE), *args], env=env, capture_output=True, timeout=10
+            [str(EXECUTABLE), *args], env=env, input=input_data,
+            capture_output=True, timeout=10
         )
 
     def test_help_and_version(self):
@@ -211,6 +212,102 @@ class FetchTests(unittest.TestCase):
                     result = self.run_fetch(["--no-info", "--frames", "1"], home)
                     self.assertEqual(result.returncode, 0)
                     self.assertTrue(result.stdout)
+
+    def test_truncated_utf8_info(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "logo.txt").write_text("# distro: gentoo\n@@@\n")
+            (config_dir / "config").write_text("---\n" * 29 + "locale\n")
+            for prefix in range(4):
+                with self.subTest(prefix=prefix):
+                    result = self.run_fetch(
+                        ["--frames", "1"], home, {"LANG": "A" * prefix + "😀" * 250}
+                    )
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, b"")
+                    result.stdout.decode("utf-8")
+
+    def test_terminal_controls_in_config(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "logo.txt").write_text("# distro: gentoo\n@@@\n")
+            payload = (b"\x1b]52;c;YXVkaXQ=\x07\x1bPpayload\x1b\\"
+                       b"\x9d52;c;YXVkaXQ=\x07\r")
+            for box in [0, 1]:
+                with self.subTest(box=box):
+                    (config_dir / "config").write_bytes(
+                        f"show_title=0\nbox={box}\ncustom_Test=".encode()
+                        + "é█\x1b[31mvisible\x1b[0m".encode() + payload + b"\n"
+                    )
+                    result = self.run_fetch(["--frames", "1"], home)
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, b"")
+                    self.assertIn("é█\x1b[31mvisible\x1b[0m".encode(), result.stdout)
+                    for control in [b"\x1b]", b"\x1bP", b"\x07", b"\x9d52;", b"\r"]:
+                        self.assertNotIn(control, result.stdout)
+                    result.stdout.decode("utf-8")
+            for key in ["size", "height", "shading_mode"]:
+                with self.subTest(diagnostic=key):
+                    (config_dir / "config").write_bytes(key.encode() + b"=" + payload + b"\n")
+                    result = self.run_fetch(["--frames", "1"], home)
+                    for control in [b"\x1b]", b"\x1bP", b"\x07", b"\x9d52;", b"\r"]:
+                        self.assertNotIn(control, result.stderr)
+
+    def test_color_validation(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "logo.txt").write_text("# distro: gentoo\n@@@\n")
+            config = config_dir / "config"
+            settings = "show_title=0\ncustom_Test=visible\n"
+            config.write_text(settings)
+            baseline = self.run_fetch(["--frames", "1"], home)
+            for key in ["label_color", "logo_inner", "logo_outer"]:
+                for value in ["31J", "31m\x1b]52;c;YXVkaXQ=\x07", "9" * 64, ""]:
+                    with self.subTest(key=key, value=value):
+                        config.write_text(settings + f"{key}={value}\n")
+                        result = self.run_fetch(["--frames", "1"], home)
+                        self.assertEqual(result.returncode, 0)
+                        self.assertIn(key.encode(), result.stderr)
+                        self.assertEqual(result.stdout, baseline.stdout)
+            for value in ["red", "38;5;123", "38;2;1;2;3"]:
+                with self.subTest(valid_color=value):
+                    config.write_text(settings + f"label_color={value}\n")
+                    result = self.run_fetch(["--frames", "1"], home)
+                    code = "31" if value == "red" else value
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, b"")
+                    self.assertIn(f"\x1b[1;{code}mTest".encode(), result.stdout)
+
+    def test_escape_number_limits(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "logo.txt").write_bytes(
+                b"# distro: gentoo\n\x1b[" + b"9" * 100 + b"m@@@\n"
+            )
+            args = ["--no-info", "--frames", "1"]
+            result = self.run_fetch(args, home)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, b"")
+            for payload in [
+                b"\x1b[<" + b"9" * 20 + b";1;1M",
+                b"\x1b[<0;1;1M\x1b[<32;" + b"9" * 20 + b";1M",
+                b"\x1b[<0;1;1M\x1b[<32;1;" + b"9" * 20 + b"M",
+                b"\x1b[<0;",
+                b"\x1b[<" + b"0" * 200,
+                b"\x1b[<" + b"0" * 125,
+            ]:
+                with self.subTest(payload=payload):
+                    result = self.run_fetch(args, home, input_data=payload)
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, b"")
 
 
 if __name__ == "__main__":
