@@ -141,6 +141,22 @@ static int utf8_char_len(unsigned char c) {
   return 1; // invalid, treat as 1
 }
 
+static int printable_utf8_len(const char *p) {
+  unsigned char c = (unsigned char)p[0];
+  if (c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xc2) || c > 0xf4)
+    return 0;
+  int len = utf8_char_len(c);
+  for (int i = 1; i < len; i++)
+    if (((unsigned char)p[i] & 0xc0) != 0x80)
+      return 0;
+  unsigned char second = (unsigned char)p[1];
+  if ((c == 0xc2 && second < 0xa0) || (c == 0xe0 && second < 0xa0) ||
+      (c == 0xed && second >= 0xa0) || (c == 0xf0 && second < 0x90) ||
+      (c == 0xf4 && second >= 0x90))
+    return 0;
+  return len;
+}
+
 // Skip past an ANSI escape sequence (ESC [ ... letter)
 // Returns number of bytes to skip, or 0 if not an escape
 static int skip_ansi(const char *p) {
@@ -152,6 +168,29 @@ static int skip_ansi(const char *p) {
   if (p[i])
     i++; // skip the final letter
   return i;
+}
+
+// Keep text and SGR colors, not terminal commands or malformed UTF-8.
+static void sanitize_text(char *text) {
+  char *out = text;
+  const char *p = text;
+  while (*p) {
+    int a = skip_ansi(p);
+    int len = a && p[a - 1] == 'm' ? a : printable_utf8_len(p);
+    if (!len) {
+      p++;
+      continue;
+    }
+    memmove(out, p, len);
+    out += len;
+    p += len;
+  }
+  *out = '\0';
+}
+
+static int append_escape_digit(int number, char digit) {
+  int value = digit - '0';
+  return number > (INT_MAX - value) / 10 ? INT_MAX : number * 10 + value;
 }
 
 // Strip a trailing " (...)" documentation hint, e.g. from a config value
@@ -191,14 +230,7 @@ static int visible_width(const char *s) {
 // max_cols < 0 = no limit). Appends a reset if the clip cut a color short.
 static char *emit_clipped(char *p, char *end, const char *s, int max_cols) {
   // first pass: measure visible width to know if we need to clip
-  int total_w = 0;
-  const char *t = s;
-  while (*t) {
-    int a = skip_ansi(t);
-    if (a) { t += a; continue; }
-    t += utf8_char_len((unsigned char)*t);
-    total_w++;
-  }
+  int total_w = visible_width(s);
   int need_clip = (max_cols >= 0 && total_w > max_cols);
   int limit = max_cols;
   if (need_clip && max_cols >= 6)
@@ -290,17 +322,15 @@ static void parse_shading(const char *str) {
   shading_count = 0;
   const char *p = str;
   while (*p && shading_count < MAX_SHADING) {
-    int len = utf8_char_len((unsigned char)*p);
-    if (len > 4)
-      len = 4;
-    // Make sure we don't read past end of string
-    int actual = 0;
-    while (actual < len && p[actual])
-      actual++;
-    memcpy(shading_chars[shading_count], p, actual);
-    shading_chars[shading_count][actual] = '\0';
+    int len = printable_utf8_len(p);
+    if (!len) {
+      p++;
+      continue;
+    }
+    memcpy(shading_chars[shading_count], p, len);
+    shading_chars[shading_count][len] = '\0';
     shading_count++;
-    p += actual;
+    p += len;
   }
   if (shading_count == 0) {
     // Fallback
@@ -387,7 +417,7 @@ static void process_logo_row(int row) {
       int num = 0, has_num = 0;
       while (p[i] && ((p[i] >= '0' && p[i] <= '9') || p[i] == ';')) {
         if (p[i] >= '0' && p[i] <= '9') {
-          num = num * 10 + (p[i] - '0');
+          num = append_escape_digit(num, p[i]);
           has_num = 1;
         } else if (p[i] == ';') {
           if (has_num && ((num >= 30 && num <= 37) || num == 39 ||
@@ -1031,6 +1061,28 @@ static void config_defaults(void) {
   }
 }
 
+static void set_config_color(const char *key, const char *value, char *out,
+                             size_t size, int escape) {
+  static const char *names[] = {
+      "red", "green", "yellow", "blue", "magenta", "cyan", "white"};
+  static const char *codes[] = {"31", "32", "33", "34", "35", "36", "37"};
+  const char *code = value;
+  for (int i = 0; i < 7; i++)
+    if (strcmp(value, names[i]) == 0) {
+      code = codes[i];
+      break;
+    }
+  int valid = code[0] && strlen(code) < size - (escape ? 5 : 0);
+  for (const char *p = code; valid && *p; p++)
+    if ((*p < '0' || *p > '9') && *p != ';')
+      valid = 0;
+  if (!valid) {
+    fprintf(stderr, "fetch: ignoring invalid %s\n", key);
+    return;
+  }
+  snprintf(out, size, escape ? "\033[1;%sm" : "%s", code);
+}
+
 static void load_config(void) {
   const char *home = getenv("HOME");
   if (!home)
@@ -1052,6 +1104,7 @@ static void load_config(void) {
     while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' ||
                        buf[len - 1] == ' '))
       buf[--len] = '\0';
+    sanitize_text(buf);
     // Skip comments and empty lines
     char *line = buf;
     while (*line == ' ' || *line == '\t')
@@ -1063,23 +1116,7 @@ static void load_config(void) {
     if (strncmp(line, "label_color=", 12) == 0) {
       char *val = line + 12;
       strip_inline_hint(val);
-      // Accept color names or numbers
-      if (strcmp(val, "red") == 0)
-        strcpy(label_color, "31");
-      else if (strcmp(val, "green") == 0)
-        strcpy(label_color, "32");
-      else if (strcmp(val, "yellow") == 0)
-        strcpy(label_color, "33");
-      else if (strcmp(val, "blue") == 0)
-        strcpy(label_color, "34");
-      else if (strcmp(val, "magenta") == 0)
-        strcpy(label_color, "35");
-      else if (strcmp(val, "cyan") == 0)
-        strcpy(label_color, "36");
-      else if (strcmp(val, "white") == 0)
-        strcpy(label_color, "37");
-      else
-        strncpy(label_color, val, sizeof(label_color) - 1);
+      set_config_color("label_color", val, label_color, sizeof(label_color), 0);
       continue;
     }
     if (strncmp(line, "height=", 7) == 0) {
@@ -1150,27 +1187,15 @@ static void load_config(void) {
     if (strncmp(line, "logo_outer=", 11) == 0) {
       char *val = line + 11;
       strip_inline_hint(val);
-      if (strcmp(val, "red") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;31m");
-      else if (strcmp(val, "green") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;32m");
-      else if (strcmp(val, "yellow") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;33m");
-      else if (strcmp(val, "blue") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;34m");
-      else if (strcmp(val, "magenta") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;35m");
-      else if (strcmp(val, "cyan") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;36m");
-      else if (strcmp(val, "white") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;37m");
-      else snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;%sm", val);
+      set_config_color("logo_outer", val, config_logo_outer,
+                       sizeof(config_logo_outer), 1);
       continue;
     }
     if (strncmp(line, "logo_inner=", 11) == 0) {
       char *val = line + 11;
       strip_inline_hint(val);
-      if (strcmp(val, "red") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;31m");
-      else if (strcmp(val, "green") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;32m");
-      else if (strcmp(val, "yellow") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;33m");
-      else if (strcmp(val, "blue") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;34m");
-      else if (strcmp(val, "magenta") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;35m");
-      else if (strcmp(val, "cyan") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;36m");
-      else if (strcmp(val, "white") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;37m");
-      else snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;%sm", val);
+      set_config_color("logo_inner", val, config_logo_inner,
+                       sizeof(config_logo_inner), 1);
       continue;
     }
     if (strncmp(line, "light=", 6) == 0) {
@@ -1301,6 +1326,7 @@ static void add_line(const char *line) {
     return;
   strncpy(fetch_lines[fetch_line_count], line, MAX_LINE_LEN - 1);
   fetch_lines[fetch_line_count][MAX_LINE_LEN - 1] = '\0';
+  sanitize_text(fetch_lines[fetch_line_count]);
   fetch_line_count++;
 }
 
@@ -1319,6 +1345,7 @@ static void add_info(const char *label, const char *fmt, ...) {
   char line[MAX_LINE_LEN];
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
            val);
+  sanitize_text(line);
 
   // Refresh tick: replace the field's line in place. Initial pass: always
   // append a new line (so gathers that emit multiple rows, like multi-GPU,
@@ -1457,7 +1484,7 @@ static void gather_title(void) {
     if (env)
       strncpy(user, env, sizeof(user) - 1);
   }
-  gethostname(host, sizeof(host));
+  gethostname(host, sizeof(host) - 1);
 
   char line[MAX_LINE_LEN];
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m@\033[1;%sm%s\033[0m",
@@ -4518,7 +4545,8 @@ int main(int argc, char **argv) {
         }
       } else {
         int n = read(STDIN_FILENO, ibuf + ibuf_len, sizeof(ibuf) - ibuf_len);
-        if (n > 0) ibuf_len += n;
+        if (n <= 0) { should_break = 1; break; }
+        ibuf_len += n;
       }
 
       int i = 0;
@@ -4529,15 +4557,15 @@ int main(int argc, char **argv) {
             int j = i + 3;
             int btn = 0, mx = 0, my = 0;
             while (j < ibuf_len && ibuf[j] >= '0' && ibuf[j] <= '9')
-              btn = btn * 10 + (ibuf[j++] - '0');
+              btn = append_escape_digit(btn, ibuf[j++]);
             if (j >= ibuf_len) break;
             if (ibuf[j] == ';') j++;
             while (j < ibuf_len && ibuf[j] >= '0' && ibuf[j] <= '9')
-              mx = mx * 10 + (ibuf[j++] - '0');
+              mx = append_escape_digit(mx, ibuf[j++]);
             if (j >= ibuf_len) break;
             if (ibuf[j] == ';') j++;
             while (j < ibuf_len && ibuf[j] >= '0' && ibuf[j] <= '9')
-              my = my * 10 + (ibuf[j++] - '0');
+              my = append_escape_digit(my, ibuf[j++]);
             if (j >= ibuf_len) break;
             char trail = ibuf[j++];
             if (trail != 'M' && trail != 'm') { i = j; continue; }
@@ -4577,6 +4605,8 @@ int main(int argc, char **argv) {
       } else if (i >= ibuf_len) {
         ibuf_len = 0;
       }
+      if (ibuf_len == (int)sizeof(ibuf))
+        should_break = 1;
       if (should_break) break;
     }
     if (should_break) break;

@@ -59,6 +59,9 @@ custom_Editor=neovim
 
 These render like built-in fields (`Pronouns: he/him`) with the configured label color. You can place them anywhere in the field list and mix them with separators. No command execution — values are static strings only.
 
+Text preserves UTF-8 and ANSI SGR colors, but discards malformed UTF-8 and
+terminal control characters such as clipboard-setting escapes.
+
 ## Appearance
 
 ```
@@ -73,6 +76,9 @@ label_color=magenta
 ```
 
 Color of the labels (the "CPU:", "Memory:", etc. text). Accepts: `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or an ANSI color number.
+
+Numeric colors may contain digits and semicolons (for example `38;5;123`).
+Invalid or oversized color values are ignored with a warning.
 
 ```
 separator=-
