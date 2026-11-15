@@ -1,5 +1,5 @@
 # fetch
-![GitHub license](https://img.shields.io/github/license/areofyl/fetch?color=blue) ![fetch.c size](https://img.shields.io/github/size/areofyl/fetch/fetch.c?label=fetch.c) ![GitHub Release](https://img.shields.io/github/v/release/areofyl/fetch?label=latest) ![GitHub stars](https://img.shields.io/github/stars/areofyl/fetch) 
+[![GitHub license](https://img.shields.io/github/license/areofyl/fetch?color=blue)](https://github.com/areofyl/fetch/blob/main/LICENSE) [![fetch.c size](https://img.shields.io/github/size/areofyl/fetch/fetch.c?label=fetch.c)](https://github.com/areofyl/fetch/blob/main/fetch.c) [![GitHub Release](https://img.shields.io/github/v/release/areofyl/fetch?label=latest)](https://github.com/areofyl/fetch/releases/latest) ![GitHub stars](https://img.shields.io/github/stars/areofyl/fetch) 
 
 A donut.c-inspired fetch tool that spins your distro logo in 3D with live-updating system info.
 
