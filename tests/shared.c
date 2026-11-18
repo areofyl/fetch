@@ -99,10 +99,30 @@ static void test_minimal_logos(void) {
   }
 }
 
+static int ring_point_count(int solid) {
+  logo_rows = 3;
+  strcpy(logo_data[0], "MMM");
+  strcpy(logo_data[1], "M M");
+  strcpy(logo_data[2], "MMM");
+  process_logo();
+  POINT_COUNT = 0;
+  config_depth = 1.0f;
+  depth_user_set = 1;
+  config_solid_edges = solid;
+  build_points();
+  config_solid_edges = 0;
+  return POINT_COUNT;
+}
+
+static void test_solid_edges(void) {
+  CHECK(ring_point_count(1) > ring_point_count(0));
+}
+
 int main(void) {
   test_info_bounds();
   test_box_without_title();
   test_minimal_logos();
+  test_solid_edges();
   printf("Shared unit tests: %s\n", failures ? "FAILED" : "passed");
   return failures ? 1 : 0;
 }
