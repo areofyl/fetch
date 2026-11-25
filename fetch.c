@@ -2866,11 +2866,21 @@ static void gather_disk_one(const char *path) {
   if (st.f_blocks == 0)
     return;
 
-  float total_gib = (float)st.f_blocks * (float)st.f_frsize / (1024 * 1024 * 1024);
-  float free_gib = (float)st.f_bfree * (float)st.f_frsize / (1024 * 1024 * 1024);
-  float used_gib = total_gib - free_gib;
-  int pct = (int)(used_gib * 100 / total_gib);
+  double total_bytes = (double)st.f_blocks * st.f_frsize;
+  double free_bytes = (double)st.f_bfree * st.f_frsize;
+  double used_bytes = total_bytes - free_bytes;
+  int pct = (int)(used_bytes * 100 / total_bytes);
   const char *color = pct >= 80 ? "31" : pct >= 50 ? "93" : "32";
+
+  double divisor = 1024.0 * 1024.0 * 1024.0; // GiB by default
+  const char *unit = "GiB";
+  if (total_bytes >= 1024.0 * 1024.0 * 1024.0 * 1024.0) {
+    divisor *= 1024.0;
+    unit = "TiB";
+  }
+
+  float total_val = (float)(total_bytes / divisor);
+  float used_val = (float)(used_bytes / divisor);
 
   char label[64];
   snprintf(label, sizeof(label), "Disk (%s)", path);
@@ -2903,11 +2913,11 @@ static void gather_disk_one(const char *path) {
 #endif
 
   if (fstype[0])
-    add_info(label, "%.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m) - %s",
-             used_gib, total_gib, color, pct, fstype);
+    add_info(label, "%.2f %s / %.2f %s (\033[%sm%d%%\033[0m) - %s",
+             used_val, unit, total_val, unit, color, pct, fstype);
   else
-    add_info(label, "%.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)", used_gib,
-             total_gib, color, pct);
+    add_info(label, "%.2f %s / %.2f %s (\033[%sm%d%%\033[0m)", 
+             used_val, unit, total_val, unit, color, pct);
 }
 
 static void gather_disk(void) {
