@@ -142,6 +142,12 @@ depth=1.0
 3D extrusion depth. Higher = chunkier relief. Range: 0.1 to 10.0. If not set, fetch auto-scales depth based on the logo's character variance so flat logos don't look paper-thin.
 
 ```
+solid_edges=1
+```
+
+Give outline characters extruded side walls. Off by default, so the outline of relief logos stays clean while spinning. Turn it on for flat, solid logos (every character the same weight) so the rim isn't see-through edge-on.
+
+```
 height=36
 ```
 

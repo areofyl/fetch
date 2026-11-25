@@ -977,6 +977,8 @@ static char config_shading_mode[16] = "";
 static char config_separator[8] = "-";
 static float config_depth = 1.0f;
 static int depth_user_set = 0;
+// Give outline cells side walls (flat, gear-like logos)
+static int config_solid_edges = 0;
 static char config_logo_outer[32] = "";
 static char config_logo_inner[32] = "";
 #define MAX_EXTRA_DISKS 8
@@ -1145,6 +1147,12 @@ static void load_config(void) {
       strip_inline_hint(val);
       if (parse_number("depth", val, 0.1f, 10.0f, &config_depth))
         depth_user_set = 1;
+      continue;
+    }
+    if (strncmp(line, "solid_edges=", 12) == 0) {
+      char *val = line + 12;
+      strip_inline_hint(val);
+      config_solid_edges = (strcmp(val, "1") == 0);
       continue;
     }
     if (strncmp(line, "logo_outer=", 11) == 0) {
@@ -3985,7 +3993,8 @@ static void build_points(void) {
                 is_edge = 1;
             }
           }
-          int layers = (is_edge || ih < 0.15f) ? 2 : Z_LAYERS;
+          int thin_edge = is_edge && !config_solid_edges;
+          int layers = (thin_edge || ih < 0.15f) ? 2 : Z_LAYERS;
 
           for (int k = 0; k < layers; k++) {
             if (idx >= MAX_POINTS)
