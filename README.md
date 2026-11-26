@@ -262,7 +262,7 @@ colors
 
 # 3d
 # light=top-left        (top-left, top-right, top, left, right, front, bottom-left, bottom-right)
-# spin=<axes>           (x, y, z, or xyz)
+# spin=xy               (x, y, z, xy, xz, yz, or xyz)
 # speed=1.0             (rotation speed)
 # size=1.0              (logo scale, e.g. 2.0 for double size)
 # depth=1.0             (3D extrusion depth, e.g. 3.0 for chunkier look)

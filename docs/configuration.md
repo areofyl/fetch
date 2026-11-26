@@ -121,7 +121,7 @@ Light direction. Options: `top-left` (default), `top-right`, `top`, `left`, `rig
 spin=xy
 ```
 
-Which axes to rotate around. `x`, `y`, `z` or `xyz` (default: `xy`).
+Which axes to rotate around. `x`, `y`, `z`, `xy`, `xz`, `yz` or `xyz` (default: `xy`).
 
 ```
 speed=1.0

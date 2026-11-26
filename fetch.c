@@ -4218,7 +4218,7 @@ int main(int argc, char **argv) {
           "top,\n"
           "                             left, right, front, bottom-left, "
           "bottom-right)\n"
-          "    spin=<axes>              Rotation axes (x, y, z, or xyz)\n"
+          "    spin=<axes>              Rotation axes (x, y, z, xy, xz, yz, or xyz)\n"
           "    speed=<float>            Rotation speed\n"
           "    size=<float>             Logo scale\n"
           "    height=<n>               Render height in rows\n\n"
