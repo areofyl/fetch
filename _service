@@ -1,8 +1,9 @@
 <services>
+  <!-- Commit for v2.3.0; keep in sync with fetch.spec. -->
   <service name="download_url">
     <param name="host">github.com</param>
     <param name="protocol">https</param>
-    <param name="path">/RealOrangeKun/fetch/archive/refs/heads/main.tar.gz</param>
+    <param name="path">/areofyl/fetch/archive/9c8bb96bf47460b7c73c9e3423f8d073a67222d3.tar.gz</param>
     <param name="filename">fetch-2.3.0.tar.gz</param>
   </service>
 </services>
