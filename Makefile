@@ -12,7 +12,7 @@ ifeq ($(UNAME_S),Darwin)
   LDLIBS += -framework IOKit -framework CoreFoundation
 endif
 
-fetch: fetch.c
+fetch: fetch.c VERSION Makefile
 	$(CC) $(CFLAGS) $(LDFLAGS) -DFETCH_VERSION='"$(VERSION)"' -DFETCH_CODENAME='"$(CODENAME)"' -DFETCH_ARCH='"$(UNAME_M)"' -DFETCH_OS='"$(UNAME_S)"' -o $@ $< $(LDLIBS)
 
 install: fetch
@@ -22,7 +22,7 @@ install: fetch
 clean:
 	rm -f fetch tests/shared
 
-tests/shared: tests/shared.c fetch.c
+tests/shared: tests/shared.c fetch.c Makefile
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
 test: fetch tests/shared
