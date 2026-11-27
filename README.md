@@ -6,8 +6,8 @@ A donut.c-inspired fetch tool that spins your distro logo in 3D with live-updati
 
 Takes any ASCII/Unicode distro logo, turns each character into a point cloud
 based on its visual density, and renders it as a rotating 3D relief with
-Blinn-Phong shading. System info is gathered natively with no external
-dependencies. Works on Linux and macOS.
+Blinn-Phong shading. System info comes from system files, OS APIs, and
+system utilities. Works on Linux and macOS.
 
 Based on [gentoo.c](https://github.com/areofyl/gentoo.c).
 
@@ -181,7 +181,9 @@ Without fastfetch, the built-in Gentoo logo is used.
 
 ## System info
 
-All system info is gathered natively. No fastfetch or neofetch needed:
+System info is gathered from system files and OS APIs, with utilities such as
+`lspci` and `system_profiler` used for some fields. Fastfetch and neofetch are
+not required:
 
 - **OS** - `/etc/os-release`
 - **Host** - `/proc/device-tree/model` or `/sys/class/dmi/id/product_name`
@@ -338,13 +340,15 @@ For a deep dive with visuals and code, see the [full blog post](https://asdesai.
 
 3. **Point cloud** – the heightmap is sampled into 3D points. Interior cells get
    multiple Z layers for a solid extrusion, edge cells get only front and back
-   faces to keep outlines clean.
+   faces by default to keep outlines clean. Set `solid_edges=1` to add side
+   walls to outline cells on flat, solid logos.
 
 4. **Surface normals** – computed from the height gradient at each cell using
    finite differences, giving each point a direction for lighting.
 
-5. **Rotation + projection** – every frame, all points are rotated around X/Y
-   axes, then perspective-projected onto the terminal grid with a z-buffer to
+5. **Rotation + projection** – every frame, points and surface normals are
+   rotated around the selected X, Y, and/or Z axes (X/Y by default). Points
+   are then perspective-projected onto the terminal grid with a z-buffer to
    handle occlusion.
 
 6. **Shading** – Blinn-Phong lighting (diffuse + specular) gives every visible
@@ -361,6 +365,8 @@ For a deep dive with visuals and code, see the [full blog post](https://asdesai.
 
 7. **Rendering** – the entire frame is written in a single `write()` syscall to
    avoid flicker. System info is displayed alongside the animation and
-   fast-changing fields (uptime, memory, swap) update live every second.
+   fast-changing fields (uptime, memory, swap, battery) update live roughly
+   every second.
 
-Single file C, no dependencies beyond libm.
+Single-file C, linked with libm and, on macOS, the system IOKit and
+CoreFoundation frameworks. Fastfetch is optional for loading distro logos.
