@@ -67,6 +67,43 @@ class FetchTests(unittest.TestCase):
                 self.assertIn(b"positive frame count", result.stderr)
                 self.assertEqual(result.stdout, b"")
 
+    def test_duration_limits(self):
+        for extra in [[], ["--frames", "0"], ["--frames", "2147483647"]]:
+            with self.subTest(extra=extra):
+                result = self.run_fetch(["--benchmark", "--duration", "0.1"] + extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                match = re.search(rb"Rendered (\d+) frames in ([0-9.]+) seconds", result.stdout)
+                self.assertIsNotNone(match)
+                self.assertGreater(int(match[1]), 0)
+                self.assertLess(int(match[1]), 2147483647)
+                self.assertGreaterEqual(float(match[2]), 0.1)
+                self.assertNotIn(b"\x1b", result.stdout)
+        result = self.run_fetch(["--duration", "10", "--benchmark", "--frames", "1"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"Rendered 1 frames", result.stdout)
+
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "logo.txt").write_text("@@@\n")
+            result = self.run_fetch(["--no-info", "--duration", "0.1"], home,
+                                    input_data=b"")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b"\x1b[H", result.stdout)
+            self.assertTrue(result.stdout.endswith(b"\x1b[?1002l\x1b[?1006l\x1b[?25h"))
+
+    def test_invalid_duration(self):
+        for value in ["0", "-1", "nan", "inf", "oops", "1s", "86401"]:
+            with self.subTest(value=value):
+                result = self.run_fetch(["--benchmark", "--duration", value])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"--duration", result.stderr)
+                self.assertEqual(result.stdout, b"")
+        result = self.run_fetch(["--duration"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"requires an argument", result.stderr)
+
     def test_logo_arguments_without_shell(self):
         with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
             home = Path(directory)
