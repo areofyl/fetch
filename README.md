@@ -290,6 +290,7 @@ colors
 | `--no-info` | Just the logo, no system info |
 | `--no-color` | Disable coloring |
 | `--frames <n>` | Stop after n frames |
+| `--duration <seconds>` | Stop after the allotted rendering time (0.001–86400 seconds) |
 | `--benchmark` | Measure rendering speed without terminal output or frame delays |
 | `--shading-mode <mode>` | `ascii` (default), or opt into sub-cell blocks with `sextants` (2x3) or `blocks` (2x2) |
 | `--shading-chars <str>` | Custom shading ramp, supports UTF-8 |
@@ -298,10 +299,17 @@ colors
 
 CLI flags override config file settings.
 
+Use `./fetch --duration 5` to animate for approximately five seconds. Timing
+starts after startup and system-info collection. If both `--frames` and
+`--duration` are supplied, the first limit reached stops the run. The current
+frame finishes before stopping, so a slow frame or terminal write can overrun
+the duration.
+
 ## Benchmark
 
 ```
 ./fetch --benchmark --frames 10000
+./fetch --benchmark --duration 10
 ```
 
 Reports elapsed time, FPS, milliseconds per frame, and a checksum of the final
@@ -315,7 +323,11 @@ Rendering flags such as `--size`, `--rotate-z`, and `--shading-mode` still work;
 `--logo` explicitly selects a fastfetch logo. The report includes the resulting
 canvas dimensions and point count. Input and terminal resizing are ignored.
 
-The default is 1000 frames; `--frames` must be positive in benchmark mode.
+The default is 1000 frames when no duration is supplied. With `--duration`,
+there is no frame limit unless you also set a positive `--frames` value.
+Benchmark mode requires a positive frame count or a duration.
+Duration uses a monotonic clock and is checked before each frame; this adds
+timing overhead compared with a frame-count-only benchmark.
 Compare runs with the same build settings and rendering options. The final-frame
 checksum helps spot output changes, but is not a check of every rendered frame.
 
