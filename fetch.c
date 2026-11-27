@@ -1000,6 +1000,7 @@ static float config_speed = 0.0f;
 static int config_speed_set = 0;
 static int config_spin_x = -1;    // -1 = use flag/default
 static int config_spin_y = -1;
+static int config_spin_z = -1;
 static int config_box = 0;        // 0 = off (default), 1 = on
 static int config_show_title = 1;
 static char config_shading[128] = "";
@@ -1145,6 +1146,7 @@ static void load_config(void) {
       strip_inline_hint(val);
       config_spin_x = (strchr(val, 'x') || strchr(val, 'X')) ? 1 : 0;
       config_spin_y = (strchr(val, 'y') || strchr(val, 'Y')) ? 1 : 0;
+      config_spin_z = (strchr(val, 'z') || strchr(val, 'Z')) ? 1 : 0;
       continue;
     }
     if (strncmp(line, "show_title=", 11) == 0) {
@@ -4171,7 +4173,7 @@ static void get_alignment_padding(int* vertical, int* horizontal) {
 int main(int argc, char **argv) {
   char distro[64] = "";
   const char *logo_name = NULL;
-  int rotate_x = 1, rotate_y = 1;
+  int rotate_x = 1, rotate_y = 1, rotate_z = 0;
   float speed = 1.0f;
   int show_info = 1;
   int use_color = 1;
@@ -4199,6 +4201,7 @@ int main(int argc, char **argv) {
           "all\n"
           "  --rotate-x                Lock rotation to X axis only\n"
           "  --rotate-y                Lock rotation to Y axis only\n"
+          "  --rotate-z                Lock rotation to Z axis only\n"
           "  -s, --speed <float>       Speed multiplier (default 1.0)\n"
           "  --size <float>            Scale the logo (e.g. 2.0 for double "
           "size)\n"
@@ -4242,7 +4245,7 @@ int main(int argc, char **argv) {
           "top,\n"
           "                             left, right, front, bottom-left, "
           "bottom-right)\n"
-          "    spin=<axes>              Rotation axes (x, y, or xy)\n"
+          "    spin=<axes>              Rotation axes (x, y, z, xy, xz, yz, or xyz)\n"
           "    speed=<float>            Rotation speed\n"
           "    size=<float>             Logo scale\n"
           "    height=<n>               Render height in rows\n\n"
@@ -4265,10 +4268,17 @@ int main(int argc, char **argv) {
       rotation_set = 1;
       rotate_x = 1;
       rotate_y = 0;
+      rotate_z = 0;
     } else if (strcmp(argv[i], "--rotate-y") == 0) {
       rotation_set = 1;
       rotate_x = 0;
       rotate_y = 1;
+      rotate_z = 0;
+    } else if (strcmp(argv[i], "--rotate-z") == 0) {
+      rotation_set = 1;
+      rotate_x = 0;
+      rotate_y = 0;
+      rotate_z = 1;
     } else if (strcmp(argv[i], "--speed") == 0 || strcmp(argv[i], "-s") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
@@ -4362,6 +4372,7 @@ int main(int argc, char **argv) {
   if (config_spin_x >= 0 && !rotation_set) {
     rotate_x = config_spin_x;
     rotate_y = config_spin_y;
+    rotate_z = config_spin_z;
   }
   if (box_flag)
     config_box = 1;
@@ -4477,6 +4488,7 @@ int main(int argc, char **argv) {
 
   float A = 0.0f;
   float B = 0.0f;
+  float C = 0.0f;
   float K1 = 37.0f * logo_height / 36.0f * size_scale;
   const float K2 = 5.5f;
 
@@ -4677,10 +4689,12 @@ int main(int argc, char **argv) {
       } else {
         A += rotate_x ? 0.04f * speed : 0.0f;
         B += rotate_y ? 0.06f * speed : 0.0f;
+        C += rotate_z ? 0.05f * speed : 0.0f;
       }
     }
     float cA = cosf(A), sA = sinf(A);
     float cB = cosf(B), sB = sinf(B);
+    float cC = cosf(C), sC = sinf(C);
 
     const float lx = light_x, ly = light_y, lz = light_z;
     const float y_center = (!layout_stacked && show_info)
@@ -4700,29 +4714,33 @@ int main(int argc, char **argv) {
       float x2 = px * cB + z1 * sB;
       float z2 = -px * sB + z1 * cB;
       float y2 = y1;
+      float x3 = x2 * cC - y2 * sC;
+      float y3 = x2 * sC + y2 * cC; 
 
       float ny1 = ny * cA - nz * sA;
       float nz1 = ny * sA + nz * cA;
       float nx2 = nx * cB + nz1 * sB;
       float nz2 = -nx * sB + nz1 * cB;
       float ny2 = ny1;
+      float nx3 = nx2 * cC - ny2 * sC;
+      float ny3 = nx2 * sC + ny2 * cC;
 
       float zc = z2 + K2;
       if (zc < 0.1f)
         continue;
       float ooz = 1.0f / zc;
-      int xs = (int)((half_aw + k1x2 * x2 * ooz) * sub_cols);
-      int ys = (int)((y_center - K1 * y2 * ooz) * sub_rows);
+      int xs = (int)((half_aw + k1x2 * x3 * ooz) * sub_cols);
+      int ys = (int)((y_center - K1 * y3 * ooz) * sub_rows);
       if (xs < 0 || xs >= aw * sub_cols || ys < 0 ||
           ys >= render_height * sub_rows)
         continue;
 
       if (ooz > zbuf[ys][xs]) {
-        float diff = nx2 * lx + ny2 * ly + nz2 * lz;
+        float diff = nx3 * lx + ny3 * ly + nz2 * lz;
         if (diff < 0)
           diff = 0;
 
-        float spec_dot = nx2 * hlx + ny2 * hly + nz2 * hlz;
+        float spec_dot = nx3 * hlx + ny3 * hly + nz2 * hlz;
         if (spec_dot < 0)
           spec_dot = 0;
         float spec = spec_dot * spec_dot;

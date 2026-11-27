@@ -169,10 +169,10 @@ class FetchTests(unittest.TestCase):
             home = Path(directory)
             config_dir = home / ".config" / "fetch"
             config_dir.mkdir(parents=True)
-            (config_dir / "logo.txt").write_text("  @@  \n@@@@@@\n  @@  \n")
+            (config_dir / "logo.txt").write_text("@@    \n@@@@@@\n  @@  \n")
             config = config_dir / "config"
             args = ["--no-info", "--frames", "3", "--no-color", "--speed", "20"]
-            for axis, config_axis in [("x", "y"), ("y", "x")]:
+            for axis, config_axis in [("x", "yz"), ("y", "xz"), ("z", "xy")]:
                 with self.subTest(axis=axis):
                     config.write_text("")
                     baseline = self.run_fetch(args + [f"--rotate-{axis}"], home)
@@ -181,6 +181,21 @@ class FetchTests(unittest.TestCase):
                     self.assertEqual(baseline.returncode, 0)
                     self.assertEqual(override.returncode, 0)
                     self.assertEqual(override.stdout, baseline.stdout)
+
+            config.write_text("")
+            default_spin = self.run_fetch(args, home)
+            rot_z_flag = self.run_fetch(args + ["--rotate-z"], home)
+            config.write_text("spin=z\n")
+            rot_z_cfg = self.run_fetch(args, home)
+            self.assertEqual(rot_z_cfg.returncode, 0)
+            self.assertEqual(rot_z_cfg.stdout, rot_z_flag.stdout)
+            self.assertNotEqual(rot_z_cfg.stdout, default_spin.stdout)
+
+            config.write_text("spin=xyz\n")
+            rot_xyz_cfg = self.run_fetch(args, home)
+            self.assertEqual(rot_xyz_cfg.returncode, 0)
+            self.assertNotEqual(rot_xyz_cfg.stdout, default_spin.stdout)
+            self.assertNotEqual(rot_xyz_cfg.stdout, rot_z_cfg.stdout)
 
     def test_invalid_config_numbers(self):
         with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:

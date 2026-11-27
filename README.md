@@ -262,7 +262,7 @@ colors
 
 # 3d
 # light=top-left        (top-left, top-right, top, left, right, front, bottom-left, bottom-right)
-# spin=xy               (x, y, or xy)
+# spin=xy               (x, y, z, xy, xz, yz, or xyz)
 # speed=1.0             (rotation speed)
 # size=1.0              (logo scale, e.g. 2.0 for double size)
 # depth=1.0             (3D extrusion depth, e.g. 3.0 for chunkier look)
@@ -279,6 +279,7 @@ colors
 | `-l`, `--logo <name>` | Use a logo from fastfetch by name |
 | `--rotate-x` | Lock rotation to X axis only |
 | `--rotate-y` | Lock rotation to Y axis only |
+| `--rotate-z` | Lock rotation to Z axis only |
 | `-s`, `--speed <float>` | Speed multiplier (default 1.0) |
 | `--size <float>` | Scale the logo (e.g. 2.0 for double size) |
 | `--depth <float>` | Scale the 3D depth (default 1.0) |
