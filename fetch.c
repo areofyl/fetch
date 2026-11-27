@@ -4178,6 +4178,7 @@ int main(int argc, char **argv) {
   int show_info = 1;
   int use_color = 1;
   int max_frames = 0;
+  int benchmark = 0, frames_set = 0;
   const char *shading = NULL;
   const char *shading_mode = NULL;
   int box_flag = 0;
@@ -4210,6 +4211,9 @@ int main(int argc, char **argv) {
           "  --no-info                 Just the logo, no system info\n"
           "  --no-color                Disable logo coloring\n"
           "  --frames <n>              Stop after n frames (0 = unlimited, default)\n"
+          "  --benchmark               Measure rendering without output or sleep\n"
+          "                            Built-in logo, 120x40 terminal, no config\n"
+          "                            Defaults to 1000 frames; --frames must be >0\n"
           "  --shading-mode <mode>     ascii (.,-~:;=!*#$@, the default), or "
           "opt into\n"
           "                            sub-cell blocks: sextants (2x3) or "
@@ -4299,6 +4303,8 @@ int main(int argc, char **argv) {
       show_info = 0;
     } else if (strcmp(argv[i], "--no-color") == 0) {
       use_color = 0;
+    } else if (strcmp(argv[i], "--benchmark") == 0) {
+      benchmark = 1;
     } else if (strcmp(argv[i], "--frames") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
@@ -4307,6 +4313,7 @@ int main(int argc, char **argv) {
       const char *option = argv[i];
       if (!parse_integer(option, argv[++i], 0, INT_MAX, &max_frames))
         return 1;
+      frames_set = 1;
     } else if (strcmp(argv[i], "--shading-chars") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
@@ -4355,14 +4362,28 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (benchmark) {
+    if (frames_set && max_frames == 0) {
+      fprintf(stderr, "fetch: --benchmark requires a positive frame count\n");
+      return 1;
+    }
+    if (!frames_set) max_frames = 1000;
+    show_info = 0;
+  }
+
   int cli_height = config_height;
   float cli_size = size_scale, cli_depth = config_depth;
   config_defaults();
-  load_config();
+  if (!benchmark) load_config();
   if (height_set) config_height = cli_height;
   if (size_set) size_scale = cli_size;
   if (depth_set) config_depth = cli_depth;
-  get_term_size(&term_rows, &term_cols);
+  if (benchmark) {
+    term_rows = 40;
+    term_cols = 120;
+  } else {
+    get_term_size(&term_rows, &term_cols);
+  }
 
   // Shading: CLI flags, then config, then the ascii default
   if (!shading && config_shading[0])
@@ -4388,6 +4409,9 @@ int main(int argc, char **argv) {
     if (!load_logo_fastfetch(logo_name))
       load_default_logo();
     strncpy(distro, logo_name, sizeof(distro) - 1);
+  } else if (benchmark) {
+    load_default_logo();
+    strcpy(distro, "gentoo");
   } else {
     // Try logo.txt first
     int has_custom_logo = load_logo_file();
@@ -4517,10 +4541,12 @@ int main(int argc, char **argv) {
   const float hl0 = sqrtf(hx0 * hx0 + hy0 * hy0 + hz0 * hz0);
   const float hlx = hx0 / hl0, hly = hy0 / hl0, hlz = hz0 / hl0;
 
-  signal(SIGINT, handle_signal);
-  signal(SIGTERM, handle_signal);
-  signal(SIGWINCH, handle_winch);
-  atexit(cleanup);
+  if (!benchmark) {
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+    signal(SIGWINCH, handle_winch);
+    atexit(cleanup);
+  }
 
   int fetch_start = show_info ? 1 : 0;
   // Tighten render_height to fit the face-on logo + info,
@@ -4533,7 +4559,7 @@ int main(int argc, char **argv) {
       render_height = needed;
   }
 
-  if (tcgetattr(STDIN_FILENO, &orig_termios) == 0) {
+  if (!benchmark && tcgetattr(STDIN_FILENO, &orig_termios) == 0) {
     termios_saved = 1;
     struct termios raw = orig_termios;
     raw.c_lflag &= ~(ICANON | ECHO);
@@ -4542,12 +4568,23 @@ int main(int argc, char **argv) {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
   }
 
-  printf("\033[?25l\033[?1002h\033[?1006h\033[2J");
-  fflush(stdout);
+  if (!benchmark) {
+    printf("\033[?25l\033[?1002h\033[?1006h\033[2J");
+    fflush(stdout);
+  }
 
   int mouse_dragging = 0;
   int mouse_last_x = 0, mouse_last_y = 0;
   float drag_vx = 0.0f, drag_vy = 0.0f;
+
+  struct timespec benchmark_start, benchmark_end;
+  unsigned long long rendered_bytes = 0;
+  const char *last_frame = NULL;
+  size_t last_frame_size = 0;
+  if (benchmark && clock_gettime(CLOCK_MONOTONIC, &benchmark_start) != 0) {
+    perror("fetch: benchmark clock");
+    return 1;
+  }
 
   for (int frame = 0; max_frames == 0 || frame < max_frames; frame++) {
     // Read input: mouse events control rotation, any other key exits.
@@ -4555,7 +4592,7 @@ int main(int argc, char **argv) {
     // Non-escape bytes stay in the buffer so the shell gets the keypress.
     int should_break = 0;
     struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
-    while (poll(&pfd, 1, 0) > 0) {
+    while (!benchmark && poll(&pfd, 1, 0) > 0) {
       static char ibuf[128];
       static int ibuf_len = 0;
 
@@ -4778,7 +4815,8 @@ int main(int argc, char **argv) {
       out_cap = out_buf ? need : 0;
     }
     if (!out_buf) {
-      printf("\033[?25h");
+      if (!benchmark) printf("\033[?25h");
+      fprintf(stderr, "fetch: couldn't allocate frame buffer\n");
       return 1;
     }
     char *p = out_buf;
@@ -4878,9 +4916,35 @@ int main(int argc, char **argv) {
         *p++ = '\n';
       }
     }
-    if (write(STDOUT_FILENO, out_buf, p - out_buf) < 0)
-      break;
-    usleep(50000);
+    if (benchmark) {
+      last_frame = out_buf;
+      last_frame_size = (size_t)(p - out_buf);
+      rendered_bytes += last_frame_size;
+    } else {
+      if (write(STDOUT_FILENO, out_buf, p - out_buf) < 0)
+        break;
+      usleep(50000);
+    }
+  }
+
+  if (benchmark) {
+    if (clock_gettime(CLOCK_MONOTONIC, &benchmark_end) != 0) {
+      perror("fetch: benchmark clock");
+      return 1;
+    }
+    double elapsed = (double)(benchmark_end.tv_sec - benchmark_start.tv_sec) +
+                     (benchmark_end.tv_nsec - benchmark_start.tv_nsec) / 1e9;
+    // Consume the final frame outside the timed loop for output comparisons.
+    uint32_t checksum = 2166136261u;
+    for (size_t i = 0; i < last_frame_size; i++)
+      checksum = (checksum ^ (unsigned char)last_frame[i]) * 16777619u;
+    printf("Rendered %d frames in %.6f seconds\n", max_frames, elapsed);
+    printf("%.2f FPS, %.6f ms/frame\n",
+           elapsed > 0 ? max_frames / elapsed : 0,
+           elapsed * 1000 / max_frames);
+    printf("Canvas: %dx%d, points: %d, bytes: %llu, final-frame checksum: %08x\n",
+           anim_width, render_height, POINT_COUNT, rendered_bytes, checksum);
+    return 0;
   }
 
   printf("\033[?25h");
