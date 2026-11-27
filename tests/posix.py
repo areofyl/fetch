@@ -28,6 +28,45 @@ class FetchTests(unittest.TestCase):
         self.assertIn(b"Usage:", self.run_fetch(["--help"]).stdout)
         self.assertIn(platform.system().encode(), self.run_fetch(["--version"]).stdout)
 
+    def test_benchmark_repeatable(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            args = ["--benchmark", "--frames", "25"]
+            baseline = self.run_fetch(args, home, {"PATH": ""}, input_data=b"quit")
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            self.assertEqual(baseline.stderr, b"")
+            self.assertNotIn(b"\x1b", baseline.stdout)
+            self.assertRegex(baseline.stdout, rb"Rendered 25 frames in [0-9.]+ seconds")
+            self.assertRegex(baseline.stdout, rb"[0-9.]+ FPS, [0-9.]+ ms/frame")
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "config").write_text("size=invalid\nspin=z\nshading_mode=blocks\n")
+            (config_dir / "logo.txt").write_text("@@\n")
+            repeated = self.run_fetch(args, home, {"PATH": ""}, input_data=b"")
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(repeated.stderr, b"")
+            self.assertEqual(baseline.stdout.splitlines()[-1],
+                             repeated.stdout.splitlines()[-1])
+            rotated = self.run_fetch(args + ["--rotate-z"], home)
+            self.assertEqual(rotated.returncode, 0, rotated.stderr)
+            self.assertNotEqual(baseline.stdout.split(b"checksum: ")[-1],
+                                rotated.stdout.split(b"checksum: ")[-1])
+            blocks = self.run_fetch(args + ["--shading-mode", "blocks"], home)
+            self.assertEqual(blocks.returncode, 0, blocks.stderr)
+            self.assertNotIn(b"\x1b", blocks.stdout)
+
+    def test_benchmark_frame_limits(self):
+        result = self.run_fetch(["--benchmark"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"Rendered 1000 frames", result.stdout)
+        for args in [["--benchmark", "--frames", "0"],
+                     ["--frames", "0", "--benchmark"]]:
+            with self.subTest(args=args):
+                result = self.run_fetch(args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"positive frame count", result.stderr)
+                self.assertEqual(result.stdout, b"")
+
     def test_logo_arguments_without_shell(self):
         with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
             home = Path(directory)
