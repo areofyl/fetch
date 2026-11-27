@@ -126,6 +126,18 @@ class FetchTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0)
                     self.assertTrue(result.stdout)
 
+    def test_truecolor_label_color(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "logo.txt").write_text("  @@  \n@@@@@@\n  @@  \n")
+            (config_dir / "config").write_text(
+                "custom_Test=value\nlabel_color=38;2;255;181;150\n")
+            result = self.run_fetch(["--frames", "1"], home)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn(b"\x1b[1;38;2;255;181;150mTest", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
