@@ -22,6 +22,9 @@
 #include <limits.h>
 #include <ctype.h>
 #include <errno.h>
+#ifndef __APPLE__
+#include <sys/prctl.h>
+#endif
 
 #ifdef __APPLE__
 #include <sys/sysctl.h>
@@ -1345,12 +1348,42 @@ static void add_line(const char *line) {
 
 static int box_width = 0; // >0 once box_wrap_lines() has run
 
+#ifndef __APPLE__
+// Background sampler: gathers live fields in a child process and streams
+// fixed-size records over a non-blocking pipe.
+struct stat_msg {
+  int field;
+  char label[80];
+  char value[MAX_LINE_LEN];
+};
+
+static int stats_pipe_r = -1;
+static int stats_pipe_w = -1;
+static pid_t stats_pid = -1;
+static int capture_field = -1;
+#endif
+
 static void add_info(const char *label, const char *fmt, ...) {
   char val[MAX_LINE_LEN];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(val, sizeof(val), fmt, ap);
   va_end(ap);
+
+#ifndef __APPLE__
+  if (stats_pipe_w >= 0) {
+    struct stat_msg msg = {0};
+    msg.field = capture_field;
+    snprintf(msg.label, sizeof(msg.label), "%s", label);
+    snprintf(msg.value, sizeof(msg.value), "%s", val);
+    ssize_t n;
+    do {
+      n = write(stats_pipe_w, &msg, sizeof(msg));
+    } while (n < 0 && errno == EINTR);
+    if (n != (ssize_t)sizeof(msg)) _exit(0);
+    return;
+  }
+#endif
 
   char line[MAX_LINE_LEN];
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
@@ -4170,6 +4203,30 @@ static void get_alignment_padding(int* vertical, int* horizontal) {
   }
 }
 
+#ifndef __APPLE__
+static void stats_child_run(int write_fd) {
+  signal(SIGINT, SIG_DFL);
+  signal(SIGTERM, SIG_DFL);
+  signal(SIGPIPE, SIG_DFL);
+  signal(SIGWINCH, SIG_IGN);
+  prctl(PR_SET_NAME, "fetch-stats", 0, 0, 0);
+  int devnull = open("/dev/null", O_RDWR);
+  if (devnull >= 0) {
+    dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2);
+    if (devnull > 2) close(devnull);
+  }
+  stats_pipe_w = write_fd;
+  for (;;) {
+    sleep(1);
+    if (field_line[F_UPTIME] >= 0)  { capture_field = F_UPTIME;  gather_uptime(); }
+    if (field_line[F_MEMORY] >= 0)  { capture_field = F_MEMORY;  gather_memory(); }
+    if (field_line[F_SWAP] >= 0)    { capture_field = F_SWAP;    gather_swap(); }
+    if (field_line[F_BATTERY] >= 0) { capture_field = F_BATTERY; gather_battery(); }
+    capture_field = -1;
+  }
+}
+#endif
+
 int main(int argc, char **argv) {
   char distro[64] = "";
   const char *logo_name = NULL;
@@ -4542,6 +4599,31 @@ int main(int argc, char **argv) {
   int mouse_last_x = 0, mouse_last_y = 0;
   float drag_vx = 0.0f, drag_vy = 0.0f;
 
+#ifndef __APPLE__
+  int has_live = field_line[F_UPTIME] >= 0 || field_line[F_MEMORY] >= 0 ||
+                 field_line[F_SWAP] >= 0   || field_line[F_BATTERY] >= 0;
+  if (show_info && has_live) {
+    int pfd[2];
+    if (pipe(pfd) == 0) {
+      fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+      fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+      fflush(stdout);
+      pid_t pid = fork();
+      if (pid == 0) {
+        close(pfd[0]);
+        stats_child_run(pfd[1]);
+      } else if (pid > 0) {
+        close(pfd[1]);
+        fcntl(pfd[0], F_SETFL, fcntl(pfd[0], F_GETFL, 0) | O_NONBLOCK);
+        stats_pipe_r = pfd[0];
+        stats_pid = pid;
+      } else {
+        close(pfd[0]); close(pfd[1]);
+      }
+    }
+  }
+#endif
+
   for (int frame = 0; max_frames == 0 || frame < max_frames; frame++) {
     // Read input: mouse events control rotation, any other key exits.
     // Peek one byte first — only consume input if it's an escape (mouse).
@@ -4655,27 +4737,40 @@ int main(int argc, char **argv) {
         fflush(stdout);
       }
     }
-    // Refresh fast dynamic fields every ~1 second (20 frames).
-    // Only uptime/memory/swap/battery — they're pure /proc and /sys
-    // reads, no popen, so they don't hitch the animation. Disk/ip use
-    // popen and stay static (user can restart to refresh those).
     if (show_info && frame > 0 && frame % 20 == 0) {
       is_refresh_pass = 1;
-      if (field_line[F_UPTIME] >= 0) {
-        current_field = F_UPTIME;
-        gather_uptime();
-      }
-      if (field_line[F_MEMORY] >= 0) {
-        current_field = F_MEMORY;
-        gather_memory();
-      }
-      if (field_line[F_SWAP] >= 0) {
-        current_field = F_SWAP;
-        gather_swap();
-      }
-      if (field_line[F_BATTERY] >= 0) {
-        current_field = F_BATTERY;
-        gather_battery();
+#ifndef __APPLE__
+      if (stats_pipe_r >= 0) {
+        static char buf[sizeof(struct stat_msg)];
+        static size_t have = 0;
+        struct stat_msg msg;
+        int nfields = (int)(sizeof(field_line) / sizeof(field_line[0]));
+        ssize_t n;
+        while ((n = read(stats_pipe_r, buf + have, sizeof(buf) - have)) > 0) {
+          have += (size_t)n;
+          if (have < sizeof(buf))
+            continue;
+          have = 0;
+          memcpy(&msg, buf, sizeof(msg));
+          if (msg.field < 0 || msg.field >= nfields || field_line[msg.field] < 0)
+            continue;
+          msg.label[sizeof(msg.label) - 1] = '\0';
+          msg.value[sizeof(msg.value) - 1] = '\0';
+          current_field = msg.field;
+          add_info(msg.label, "%s", msg.value);
+        }
+        if (n == 0) { // child gone: drop the pipe, resume inline gathering
+          close(stats_pipe_r);
+          stats_pipe_r = -1;
+          have = 0;
+        }
+      } else
+#endif
+      {
+        if (field_line[F_UPTIME] >= 0)  { current_field = F_UPTIME;  gather_uptime(); }
+        if (field_line[F_MEMORY] >= 0)  { current_field = F_MEMORY;  gather_memory(); }
+        if (field_line[F_SWAP] >= 0)    { current_field = F_SWAP;    gather_swap(); }
+        if (field_line[F_BATTERY] >= 0) { current_field = F_BATTERY; gather_battery(); }
       }
       current_field = -1;
       is_refresh_pass = 0;
@@ -4876,6 +4971,13 @@ int main(int argc, char **argv) {
     usleep(50000);
   }
 
+#ifndef __APPLE__
+  if (stats_pipe_r >= 0) close(stats_pipe_r);
+  if (stats_pid > 0) {
+    kill(stats_pid, SIGTERM);
+    waitpid(stats_pid, NULL, 0);
+  }
+#endif
   printf("\033[?25h");
   fflush(stdout);
   return 0;
