@@ -935,7 +935,7 @@ static char custom_label[MAX_CUSTOM][64];
 static char custom_value[MAX_CUSTOM][256];
 static int custom_count = 0;
 static int is_refresh_pass = 0;     // 1 during the animation refresh tick
-static char label_color[16] = "35"; // default magenta
+static char label_color[32] = "35"; // default magenta
 static int config_height = 0;       // 0 = auto (match info lines)
 static float size_scale = 1.0f;
 static float config_speed = 0.0f;
