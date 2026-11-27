@@ -4179,6 +4179,7 @@ int main(int argc, char **argv) {
   int use_color = 1;
   int max_frames = 0;
   int benchmark = 0, frames_set = 0;
+  float duration = 0.0f;
   const char *shading = NULL;
   const char *shading_mode = NULL;
   int box_flag = 0;
@@ -4211,9 +4212,11 @@ int main(int argc, char **argv) {
           "  --no-info                 Just the logo, no system info\n"
           "  --no-color                Disable logo coloring\n"
           "  --frames <n>              Stop after n frames (0 = unlimited, default)\n"
+          "  --duration <seconds>      Stop after 0.001 to 86400 seconds of rendering\n"
+          "                            With --frames, the first limit reached wins\n"
           "  --benchmark               Measure rendering without output or sleep\n"
           "                            Built-in logo, 120x40 terminal, no config\n"
-          "                            Defaults to 1000 frames; --frames must be >0\n"
+          "                            Defaults to 1000 frames unless duration is set\n"
           "  --shading-mode <mode>     ascii (.,-~:;=!*#$@, the default), or "
           "opt into\n"
           "                            sub-cell blocks: sextants (2x3) or "
@@ -4305,6 +4308,14 @@ int main(int argc, char **argv) {
       use_color = 0;
     } else if (strcmp(argv[i], "--benchmark") == 0) {
       benchmark = 1;
+    } else if (strcmp(argv[i], "--duration") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
+        return 1;
+      }
+      const char *option = argv[i];
+      if (!parse_number(option, argv[++i], 0.001f, 86400.0f, &duration))
+        return 1;
     } else if (strcmp(argv[i], "--frames") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
@@ -4363,11 +4374,11 @@ int main(int argc, char **argv) {
   }
 
   if (benchmark) {
-    if (frames_set && max_frames == 0) {
+    if (frames_set && max_frames == 0 && duration == 0) {
       fprintf(stderr, "fetch: --benchmark requires a positive frame count\n");
       return 1;
     }
-    if (!frames_set) max_frames = 1000;
+    if (!frames_set && duration == 0) max_frames = 1000;
     show_info = 0;
   }
 
@@ -4578,15 +4589,28 @@ int main(int argc, char **argv) {
   float drag_vx = 0.0f, drag_vy = 0.0f;
 
   struct timespec benchmark_start, benchmark_end;
+  unsigned long long rendered_frames = 0;
   unsigned long long rendered_bytes = 0;
   const char *last_frame = NULL;
   size_t last_frame_size = 0;
-  if (benchmark && clock_gettime(CLOCK_MONOTONIC, &benchmark_start) != 0) {
-    perror("fetch: benchmark clock");
+  if ((benchmark || duration > 0) &&
+      clock_gettime(CLOCK_MONOTONIC, &benchmark_start) != 0) {
+    perror("fetch: render clock");
     return 1;
   }
 
-  for (int frame = 0; max_frames == 0 || frame < max_frames; frame++) {
+  for (unsigned long long frame = 0;
+       max_frames == 0 || frame < (unsigned long long)max_frames; frame++) {
+    if (duration > 0) {
+      struct timespec now;
+      if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        perror("fetch: render clock");
+        return 1;
+      }
+      double elapsed = (double)(now.tv_sec - benchmark_start.tv_sec) +
+                       (now.tv_nsec - benchmark_start.tv_nsec) / 1e9;
+      if (elapsed >= duration) break;
+    }
     // Read input: mouse events control rotation, any other key exits.
     // Peek one byte first — only consume input if it's an escape (mouse).
     // Non-escape bytes stay in the buffer so the shell gets the keypress.
@@ -4920,10 +4944,26 @@ int main(int argc, char **argv) {
       last_frame = out_buf;
       last_frame_size = (size_t)(p - out_buf);
       rendered_bytes += last_frame_size;
+      rendered_frames++;
     } else {
       if (write(STDOUT_FILENO, out_buf, p - out_buf) < 0)
         break;
-      usleep(50000);
+      rendered_frames++;
+      if (max_frames > 0 && rendered_frames >= (unsigned long long)max_frames)
+        break;
+      unsigned int delay = 50000;
+      if (duration > 0) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+          perror("fetch: render clock");
+          return 1;
+        }
+        double remaining = duration - ((double)(now.tv_sec - benchmark_start.tv_sec) +
+                           (now.tv_nsec - benchmark_start.tv_nsec) / 1e9);
+        if (remaining <= 0) break;
+        if (remaining < 0.05) delay = (unsigned int)(remaining * 1e6);
+      }
+      usleep(delay);
     }
   }
 
@@ -4938,10 +4978,10 @@ int main(int argc, char **argv) {
     uint32_t checksum = 2166136261u;
     for (size_t i = 0; i < last_frame_size; i++)
       checksum = (checksum ^ (unsigned char)last_frame[i]) * 16777619u;
-    printf("Rendered %d frames in %.6f seconds\n", max_frames, elapsed);
+    printf("Rendered %llu frames in %.6f seconds\n", rendered_frames, elapsed);
     printf("%.2f FPS, %.6f ms/frame\n",
-           elapsed > 0 ? max_frames / elapsed : 0,
-           elapsed * 1000 / max_frames);
+           elapsed > 0 ? rendered_frames / elapsed : 0,
+           rendered_frames > 0 ? elapsed * 1000 / rendered_frames : 0);
     printf("Canvas: %dx%d, points: %d, bytes: %llu, final-frame checksum: %08x\n",
            anim_width, render_height, POINT_COUNT, rendered_bytes, checksum);
     return 0;
