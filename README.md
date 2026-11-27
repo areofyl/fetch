@@ -290,12 +290,34 @@ colors
 | `--no-info` | Just the logo, no system info |
 | `--no-color` | Disable coloring |
 | `--frames <n>` | Stop after n frames |
+| `--benchmark` | Measure rendering speed without terminal output or frame delays |
 | `--shading-mode <mode>` | `ascii` (default), or opt into sub-cell blocks with `sextants` (2x3) or `blocks` (2x2) |
 | `--shading-chars <str>` | Custom shading ramp, supports UTF-8 |
 | `-h`, `--help` | Show help |
 | `-V`, `--version` | Show version |
 
 CLI flags override config file settings.
+
+## Benchmark
+
+```
+./fetch --benchmark --frames 10000
+```
+
+Reports elapsed time, FPS, milliseconds per frame, and a checksum of the final
+frame. The timed loop includes rotation, projection, shading, and frame-buffer
+construction. Startup, system info, terminal output, and the normal frame delay
+are excluded.
+
+For repeatable runs, benchmark mode ignores your config and custom logo file,
+uses the built-in Gentoo logo, and assumes a 120-column, 40-row terminal.
+Rendering flags such as `--size`, `--rotate-z`, and `--shading-mode` still work;
+`--logo` explicitly selects a fastfetch logo. The report includes the resulting
+canvas dimensions and point count. Input and terminal resizing are ignored.
+
+The default is 1000 frames; `--frames` must be positive in benchmark mode.
+Compare runs with the same build settings and rendering options. The final-frame
+checksum helps spot output changes, but is not a check of every rendered frame.
 
 ## Shading modes
 
