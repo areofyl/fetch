@@ -4718,7 +4718,7 @@ int main(int argc, char **argv) {
       apply_layout(show_info);
       if (render_height != old_h || anim_width != old_w ||
           layout_stacked != old_stacked || info_clip_cols != old_clip) {
-        K1 = 37.0f * logo_height / 36.0f;
+        K1 = 37.0f * logo_height / 36.0f * size_scale;
         printf("\033[2J");
         fflush(stdout);
       }

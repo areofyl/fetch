@@ -1,8 +1,15 @@
 import os
+import fcntl
 import json
 import platform
+import pty
 import re
+import select
+import signal
+import struct
 import sys
+import termios
+import time
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,6 +30,52 @@ class FetchTests(unittest.TestCase):
             [str(EXECUTABLE), *args], env=env, input=input_data,
             capture_output=True, timeout=10
         )
+
+    def run_in_pty(self, args, home, rows, cols, resize_to=None, timeout=10):
+        master, slave = pty.openpty()
+        proc = None
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            proc = subprocess.Popen([str(EXECUTABLE), *args], env=env, stdin=slave,
+                                    stdout=slave, stderr=slave, start_new_session=True)
+            os.close(slave)
+            slave = None
+            out, start = b"", time.monotonic()
+            while True:
+                elapsed = time.monotonic() - start
+                if elapsed > timeout:
+                    self.fail(f"fetch did not exit within {timeout}s")
+                if resize_to and elapsed > 0.5:
+                    fcntl.ioctl(master, termios.TIOCSWINSZ,
+                                struct.pack("HHHH", resize_to[0], resize_to[1], 0, 0))
+                    proc.send_signal(signal.SIGWINCH)
+                    resize_to = None
+                if select.select([master], [], [], 0.05)[0]:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    out += chunk
+                elif proc.poll() is not None:
+                    break
+            proc.wait(timeout=max(0.1, timeout - (time.monotonic() - start)))
+            return out
+        finally:
+            if slave is not None:
+                os.close(slave)
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            os.close(master)
+
+    def last_frame_rows(self, out):
+        frame = out.decode("utf-8", "replace").split("\x1b[H")[-1]
+        frame = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", frame)
+        return sum(1 for line in frame.split("\n") if line.strip())
 
     def test_help_and_version(self):
         self.assertIn(b"Usage:", self.run_fetch(["--help"]).stdout)
@@ -399,6 +452,20 @@ class FetchTests(unittest.TestCase):
                     result = self.run_fetch(args, home, input_data=payload)
                     self.assertEqual(result.returncode, 0)
                     self.assertEqual(result.stderr, b"")
+
+    def test_size_kept_after_resize(self):
+        with tempfile.TemporaryDirectory(prefix="fetch-test-") as directory:
+            home = Path(directory)
+            config_dir = home / ".config" / "fetch"
+            config_dir.mkdir(parents=True)
+            (config_dir / "logo.txt").write_text(("@" * 30 + "\n") * 12)
+            args = ["--no-info", "--no-color", "--rotate-y", "--size", "1.5",
+                    "--height", "24", "--frames", "30"]
+            fresh = self.last_frame_rows(self.run_in_pty(args, home, 30, 80))
+            resized = self.last_frame_rows(
+                self.run_in_pty(args, home, 20, 80, resize_to=(30, 80)))
+            self.assertGreater(fresh, 0)
+            self.assertLessEqual(abs(resized - fresh), 1)
 
 
 if __name__ == "__main__":
