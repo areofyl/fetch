@@ -15,6 +15,7 @@
 #include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 #include <time.h>
@@ -140,6 +141,22 @@ static int utf8_char_len(unsigned char c) {
   return 1; // invalid, treat as 1
 }
 
+static int printable_utf8_len(const char *p) {
+  unsigned char c = (unsigned char)p[0];
+  if (c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xc2) || c > 0xf4)
+    return 0;
+  int len = utf8_char_len(c);
+  for (int i = 1; i < len; i++)
+    if (((unsigned char)p[i] & 0xc0) != 0x80)
+      return 0;
+  unsigned char second = (unsigned char)p[1];
+  if ((c == 0xc2 && second < 0xa0) || (c == 0xe0 && second < 0xa0) ||
+      (c == 0xed && second >= 0xa0) || (c == 0xf0 && second < 0x90) ||
+      (c == 0xf4 && second >= 0x90))
+    return 0;
+  return len;
+}
+
 // Skip past an ANSI escape sequence (ESC [ ... letter)
 // Returns number of bytes to skip, or 0 if not an escape
 static int skip_ansi(const char *p) {
@@ -151,6 +168,29 @@ static int skip_ansi(const char *p) {
   if (p[i])
     i++; // skip the final letter
   return i;
+}
+
+// Keep text and SGR colors, not terminal commands or malformed UTF-8.
+static void sanitize_text(char *text) {
+  char *out = text;
+  const char *p = text;
+  while (*p) {
+    int a = skip_ansi(p);
+    int len = a && p[a - 1] == 'm' ? a : printable_utf8_len(p);
+    if (!len) {
+      p++;
+      continue;
+    }
+    memmove(out, p, len);
+    out += len;
+    p += len;
+  }
+  *out = '\0';
+}
+
+static int append_escape_digit(int number, char digit) {
+  int value = digit - '0';
+  return number > (INT_MAX - value) / 10 ? INT_MAX : number * 10 + value;
 }
 
 // Strip a trailing " (...)" documentation hint, e.g. from a config value
@@ -190,14 +230,7 @@ static int visible_width(const char *s) {
 // max_cols < 0 = no limit). Appends a reset if the clip cut a color short.
 static char *emit_clipped(char *p, char *end, const char *s, int max_cols) {
   // first pass: measure visible width to know if we need to clip
-  int total_w = 0;
-  const char *t = s;
-  while (*t) {
-    int a = skip_ansi(t);
-    if (a) { t += a; continue; }
-    t += utf8_char_len((unsigned char)*t);
-    total_w++;
-  }
+  int total_w = visible_width(s);
   int need_clip = (max_cols >= 0 && total_w > max_cols);
   int limit = max_cols;
   if (need_clip && max_cols >= 6)
@@ -289,17 +322,15 @@ static void parse_shading(const char *str) {
   shading_count = 0;
   const char *p = str;
   while (*p && shading_count < MAX_SHADING) {
-    int len = utf8_char_len((unsigned char)*p);
-    if (len > 4)
-      len = 4;
-    // Make sure we don't read past end of string
-    int actual = 0;
-    while (actual < len && p[actual])
-      actual++;
-    memcpy(shading_chars[shading_count], p, actual);
-    shading_chars[shading_count][actual] = '\0';
+    int len = printable_utf8_len(p);
+    if (!len) {
+      p++;
+      continue;
+    }
+    memcpy(shading_chars[shading_count], p, len);
+    shading_chars[shading_count][len] = '\0';
     shading_count++;
-    p += actual;
+    p += len;
   }
   if (shading_count == 0) {
     // Fallback
@@ -386,7 +417,7 @@ static void process_logo_row(int row) {
       int num = 0, has_num = 0;
       while (p[i] && ((p[i] >= '0' && p[i] <= '9') || p[i] == ';')) {
         if (p[i] >= '0' && p[i] <= '9') {
-          num = num * 10 + (p[i] - '0');
+          num = append_escape_digit(num, p[i]);
           has_num = 1;
         } else if (p[i] == ';') {
           if (has_num && ((num >= 30 && num <= 37) || num == 39 ||
@@ -616,12 +647,38 @@ static int is_cursor_escape(const char *p) {
 
 // Try loading a logo from fastfetch colored output
 static int load_logo_ff_colored(const char *name) {
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd),
-           "fastfetch -c none -l %s -s break --pipe false 2>/dev/null", name);
-  FILE *fp = popen(cmd, "r");
-  if (!fp)
+  int output[2];
+  if (pipe(output) < 0)
     return 0;
+  FILE *fp = fdopen(output[0], "r");
+  if (!fp) {
+    close(output[0]);
+    close(output[1]);
+    return 0;
+  }
+  pid_t pid = fork();
+  if (pid < 0) {
+    fclose(fp);
+    close(output[1]);
+    return 0;
+  }
+  if (pid == 0) {
+    close(output[0]);
+    if (dup2(output[1], STDOUT_FILENO) < 0)
+      _exit(127);
+    if (output[1] != STDOUT_FILENO)
+      close(output[1]);
+    int null_fd = open("/dev/null", O_WRONLY);
+    if (null_fd < 0 || dup2(null_fd, STDERR_FILENO) < 0)
+      _exit(127);
+    if (null_fd != STDERR_FILENO)
+      close(null_fd);
+    char *const args[] = {"fastfetch", "-c", "none", "-l", (char *)name,
+                          "-s", "break", "--pipe", "false", NULL};
+    execvp(args[0], args);
+    _exit(127);
+  }
+  close(output[1]);
 
   char buf[512];
   while (logo_rows < MAX_LOGO_ROWS && fgets(buf, sizeof(buf), fp)) {
@@ -663,7 +720,8 @@ static int load_logo_ff_colored(const char *name) {
     memcpy(logo_data[logo_rows], buf, len + 1);
     logo_rows++;
   }
-  pclose(fp);
+  fclose(fp);
+  while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
 
   while (logo_rows > 0 && logo_data[logo_rows - 1][0] == '\0')
     logo_rows--;
@@ -942,12 +1000,16 @@ static float config_speed = 0.0f;
 static int config_speed_set = 0;
 static int config_spin_x = -1;    // -1 = use flag/default
 static int config_spin_y = -1;
+static int config_spin_z = -1;
 static int config_box = 0;        // 0 = off (default), 1 = on
+static int config_show_title = 1;
 static char config_shading[128] = "";
 static char config_shading_mode[16] = "";
 static char config_separator[8] = "-";
 static float config_depth = 1.0f;
 static int depth_user_set = 0;
+// Give outline cells side walls (flat, gear-like logos)
+static int config_solid_edges = 0;
 static char config_logo_outer[32] = "";
 static char config_logo_inner[32] = "";
 #define MAX_EXTRA_DISKS 8
@@ -1002,6 +1064,28 @@ static void config_defaults(void) {
   }
 }
 
+static void set_config_color(const char *key, const char *value, char *out,
+                             size_t size, int escape) {
+  static const char *names[] = {
+      "red", "green", "yellow", "blue", "magenta", "cyan", "white"};
+  static const char *codes[] = {"31", "32", "33", "34", "35", "36", "37"};
+  const char *code = value;
+  for (int i = 0; i < 7; i++)
+    if (strcmp(value, names[i]) == 0) {
+      code = codes[i];
+      break;
+    }
+  int valid = code[0] && strlen(code) < size - (escape ? 5 : 0);
+  for (const char *p = code; valid && *p; p++)
+    if ((*p < '0' || *p > '9') && *p != ';')
+      valid = 0;
+  if (!valid) {
+    fprintf(stderr, "fetch: ignoring invalid %s\n", key);
+    return;
+  }
+  snprintf(out, size, escape ? "\033[1;%sm" : "%s", code);
+}
+
 static void load_config(void) {
   const char *home = getenv("HOME");
   if (!home)
@@ -1023,6 +1107,7 @@ static void load_config(void) {
     while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' ||
                        buf[len - 1] == ' '))
       buf[--len] = '\0';
+    sanitize_text(buf);
     // Skip comments and empty lines
     char *line = buf;
     while (*line == ' ' || *line == '\t')
@@ -1034,23 +1119,7 @@ static void load_config(void) {
     if (strncmp(line, "label_color=", 12) == 0) {
       char *val = line + 12;
       strip_inline_hint(val);
-      // Accept color names or numbers
-      if (strcmp(val, "red") == 0)
-        strcpy(label_color, "31");
-      else if (strcmp(val, "green") == 0)
-        strcpy(label_color, "32");
-      else if (strcmp(val, "yellow") == 0)
-        strcpy(label_color, "33");
-      else if (strcmp(val, "blue") == 0)
-        strcpy(label_color, "34");
-      else if (strcmp(val, "magenta") == 0)
-        strcpy(label_color, "35");
-      else if (strcmp(val, "cyan") == 0)
-        strcpy(label_color, "36");
-      else if (strcmp(val, "white") == 0)
-        strcpy(label_color, "37");
-      else
-        strncpy(label_color, val, sizeof(label_color) - 1);
+      set_config_color("label_color", val, label_color, sizeof(label_color), 0);
       continue;
     }
     if (strncmp(line, "height=", 7) == 0) {
@@ -1077,6 +1146,14 @@ static void load_config(void) {
       strip_inline_hint(val);
       config_spin_x = (strchr(val, 'x') || strchr(val, 'X')) ? 1 : 0;
       config_spin_y = (strchr(val, 'y') || strchr(val, 'Y')) ? 1 : 0;
+      config_spin_z = (strchr(val, 'z') || strchr(val, 'Z')) ? 1 : 0;
+      continue;
+    }
+    if (strncmp(line, "show_title=", 11) == 0) {
+      char *val = line + 11;
+      strip_inline_hint(val);
+      config_show_title = (strcmp(val, "1") == 0 || strcasecmp(val, "y") == 0 ||
+                           strcasecmp(val, "yes") == 0 || strcasecmp(val, "true") == 0);
       continue;
     }
     if (strncmp(line, "box=", 4) == 0) {
@@ -1111,30 +1188,24 @@ static void load_config(void) {
         depth_user_set = 1;
       continue;
     }
+    if (strncmp(line, "solid_edges=", 12) == 0) {
+      char *val = line + 12;
+      strip_inline_hint(val);
+      config_solid_edges = (strcmp(val, "1") == 0);
+      continue;
+    }
     if (strncmp(line, "logo_outer=", 11) == 0) {
       char *val = line + 11;
       strip_inline_hint(val);
-      if (strcmp(val, "red") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;31m");
-      else if (strcmp(val, "green") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;32m");
-      else if (strcmp(val, "yellow") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;33m");
-      else if (strcmp(val, "blue") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;34m");
-      else if (strcmp(val, "magenta") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;35m");
-      else if (strcmp(val, "cyan") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;36m");
-      else if (strcmp(val, "white") == 0) snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;37m");
-      else snprintf(config_logo_outer, sizeof(config_logo_outer), "\033[1;%sm", val);
+      set_config_color("logo_outer", val, config_logo_outer,
+                       sizeof(config_logo_outer), 1);
       continue;
     }
     if (strncmp(line, "logo_inner=", 11) == 0) {
       char *val = line + 11;
       strip_inline_hint(val);
-      if (strcmp(val, "red") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;31m");
-      else if (strcmp(val, "green") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;32m");
-      else if (strcmp(val, "yellow") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;33m");
-      else if (strcmp(val, "blue") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;34m");
-      else if (strcmp(val, "magenta") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;35m");
-      else if (strcmp(val, "cyan") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;36m");
-      else if (strcmp(val, "white") == 0) snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;37m");
-      else snprintf(config_logo_inner, sizeof(config_logo_inner), "\033[1;%sm", val);
+      set_config_color("logo_inner", val, config_logo_inner,
+                       sizeof(config_logo_inner), 1);
       continue;
     }
     if (strncmp(line, "light=", 6) == 0) {
@@ -1265,6 +1336,7 @@ static void add_line(const char *line) {
     return;
   strncpy(fetch_lines[fetch_line_count], line, MAX_LINE_LEN - 1);
   fetch_lines[fetch_line_count][MAX_LINE_LEN - 1] = '\0';
+  sanitize_text(fetch_lines[fetch_line_count]);
   fetch_line_count++;
 }
 
@@ -1283,6 +1355,7 @@ static void add_info(const char *label, const char *fmt, ...) {
   char line[MAX_LINE_LEN];
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m: %s", label_color, label,
            val);
+  sanitize_text(line);
 
   // Refresh tick: replace the field's line in place. Initial pass: always
   // append a new line (so gathers that emit multiple rows, like multi-GPU,
@@ -1315,7 +1388,7 @@ static void add_info(const char *label, const char *fmt, ...) {
 // gather_*() calls, and shifts field_line[] so later live-refresh writes
 // (see add_info above) land on the right row.
 static void box_wrap_lines(void) {
-  int start = 2; // 0 = title, 1 = separator underline
+  int start = config_show_title ? 2 : 0;
   if (start >= fetch_line_count)
     return;
 
@@ -1421,7 +1494,7 @@ static void gather_title(void) {
     if (env)
       strncpy(user, env, sizeof(user) - 1);
   }
-  gethostname(host, sizeof(host));
+  gethostname(host, sizeof(host) - 1);
 
   char line[MAX_LINE_LEN];
   snprintf(line, sizeof(line), "\033[1;%sm%s\033[0m@\033[1;%sm%s\033[0m",
@@ -2830,11 +2903,21 @@ static void gather_disk_one(const char *path) {
   if (st.f_blocks == 0)
     return;
 
-  float total_gib = (float)st.f_blocks * (float)st.f_frsize / (1024 * 1024 * 1024);
-  float free_gib = (float)st.f_bfree * (float)st.f_frsize / (1024 * 1024 * 1024);
-  float used_gib = total_gib - free_gib;
-  int pct = (int)(used_gib * 100 / total_gib);
+  double total_bytes = (double)st.f_blocks * st.f_frsize;
+  double free_bytes = (double)st.f_bfree * st.f_frsize;
+  double used_bytes = total_bytes - free_bytes;
+  int pct = (int)(used_bytes * 100 / total_bytes);
   const char *color = pct >= 80 ? "31" : pct >= 50 ? "93" : "32";
+
+  double divisor = 1024.0 * 1024.0 * 1024.0; // GiB by default
+  const char *unit = "GiB";
+  if (total_bytes >= 1024.0 * 1024.0 * 1024.0 * 1024.0) {
+    divisor *= 1024.0;
+    unit = "TiB";
+  }
+
+  float total_val = (float)(total_bytes / divisor);
+  float used_val = (float)(used_bytes / divisor);
 
   char label[64];
   snprintf(label, sizeof(label), "Disk (%s)", path);
@@ -2867,11 +2950,11 @@ static void gather_disk_one(const char *path) {
 #endif
 
   if (fstype[0])
-    add_info(label, "%.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m) - %s",
-             used_gib, total_gib, color, pct, fstype);
+    add_info(label, "%.2f %s / %.2f %s (\033[%sm%d%%\033[0m) - %s",
+             used_val, unit, total_val, unit, color, pct, fstype);
   else
-    add_info(label, "%.2f GiB / %.2f GiB (\033[%sm%d%%\033[0m)", used_gib,
-             total_gib, color, pct);
+    add_info(label, "%.2f %s / %.2f %s (\033[%sm%d%%\033[0m)", 
+             used_val, unit, total_val, unit, color, pct);
 }
 
 static void gather_disk(void) {
@@ -3939,7 +4022,8 @@ static void build_points(void) {
                 is_edge = 1;
             }
           }
-          int layers = (is_edge || ih < 0.15f) ? 2 : Z_LAYERS;
+          int thin_edge = is_edge && !config_solid_edges;
+          int layers = (thin_edge || ih < 0.15f) ? 2 : Z_LAYERS;
 
           for (int k = 0; k < layers; k++) {
             if (idx >= MAX_POINTS)
@@ -4089,11 +4173,13 @@ static void get_alignment_padding(int* vertical, int* horizontal) {
 int main(int argc, char **argv) {
   char distro[64] = "";
   const char *logo_name = NULL;
-  int rotate_x = 1, rotate_y = 1;
+  int rotate_x = 1, rotate_y = 1, rotate_z = 0;
   float speed = 1.0f;
   int show_info = 1;
   int use_color = 1;
-  int max_frames = 2000;
+  int max_frames = 0;
+  int benchmark = 0, frames_set = 0;
+  float duration = 0.0f;
   const char *shading = NULL;
   const char *shading_mode = NULL;
   int box_flag = 0;
@@ -4117,6 +4203,7 @@ int main(int argc, char **argv) {
           "all\n"
           "  --rotate-x                Lock rotation to X axis only\n"
           "  --rotate-y                Lock rotation to Y axis only\n"
+          "  --rotate-z                Lock rotation to Z axis only\n"
           "  -s, --speed <float>       Speed multiplier (default 1.0)\n"
           "  --size <float>            Scale the logo (e.g. 2.0 for double "
           "size)\n"
@@ -4124,9 +4211,12 @@ int main(int argc, char **argv) {
           "  --height <n>              Override render height in rows\n"
           "  --no-info                 Just the logo, no system info\n"
           "  --no-color                Disable logo coloring\n"
-          "  --frames <n>              Stop after n frames (default 2000)\n"
-          "  --infinite                Run forever (keypress or Ctrl-C to "
-          "exit)\n"
+          "  --frames <n>              Stop after n frames (0 = unlimited, default)\n"
+          "  --duration <seconds>      Stop after 0.001 to 86400 seconds of rendering\n"
+          "                            With --frames, the first limit reached wins\n"
+          "  --benchmark               Measure rendering without output or sleep\n"
+          "                            Built-in logo, 120x40 terminal, no config\n"
+          "                            Defaults to 1000 frames unless duration is set\n"
           "  --shading-mode <mode>     ascii (.,-~:;=!*#$@, the default), or "
           "opt into\n"
           "                            sub-cell blocks: sextants (2x3) or "
@@ -4135,6 +4225,8 @@ int main(int argc, char **argv) {
           "  --box                     Draw a border box around the info block\n"
           "  -V, --version             Show version\n"
           "  -h, --help                Show this help\n\n"
+          "Press any key or Ctrl-C to exit. Drag the logo to rotate it.\n"
+          "CLI flags override config settings.\n\n"
           "Config: ~/.config/fetch/config\n"
           "  List field names to show (in order), one per line.\n"
           "  Comment out or remove fields to hide them.\n"
@@ -4153,17 +4245,24 @@ int main(int argc, char **argv) {
           "    label_color=<color>      Label color (red, green, yellow, "
           "blue,\n"
           "                             magenta, cyan, white, or ANSI number)\n"
+          "    logo_outer=<color>       Extruded side color (same color format)\n"
+          "    logo_inner=<color>       Front/back face color (same color format)\n"
           "    separator=<char>         Title separator character\n"
+          "    show_title=<0/1>         Show user@host and underline (default 1)\n"
           "    shading_mode=<mode>      ascii (default), blocks or sextants\n"
           "    shading=<str>            Shading ramp characters\n"
           "    light=<dir>              Light direction (top-left, top-right, "
           "top,\n"
           "                             left, right, front, bottom-left, "
           "bottom-right)\n"
-          "    spin=<axes>              Rotation axes (x, y, or xy)\n"
+          "    spin=<axes>              Rotation axes (x, y, z, xy, xz, yz, or xyz)\n"
           "    speed=<float>            Rotation speed\n"
           "    size=<float>             Logo scale\n"
-          "    height=<n>               Render height in rows\n\n"
+          "    depth=<float>            Extrusion depth (0.1 to 10; auto if unset)\n"
+          "    solid_edges=<0/1>        Side walls on outline cells (default 0)\n"
+          "    height=<n>               Render height in rows\n"
+          "    v_alignment=<position>   top (default), center, or bottom\n"
+          "    h_alignment=<position>   left (default), center, or right\n"
           "    box=<0/1>                Draw a border box around the info block\n\n"
           "Logo: ~/.config/fetch/logo.txt\n"
           "  Custom ASCII/Unicode logo. Add '# distro: <name>' as the\n"
@@ -4183,10 +4282,17 @@ int main(int argc, char **argv) {
       rotation_set = 1;
       rotate_x = 1;
       rotate_y = 0;
+      rotate_z = 0;
     } else if (strcmp(argv[i], "--rotate-y") == 0) {
       rotation_set = 1;
       rotate_x = 0;
       rotate_y = 1;
+      rotate_z = 0;
+    } else if (strcmp(argv[i], "--rotate-z") == 0) {
+      rotation_set = 1;
+      rotate_x = 0;
+      rotate_y = 0;
+      rotate_z = 1;
     } else if (strcmp(argv[i], "--speed") == 0 || strcmp(argv[i], "-s") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
@@ -4200,6 +4306,16 @@ int main(int argc, char **argv) {
       show_info = 0;
     } else if (strcmp(argv[i], "--no-color") == 0) {
       use_color = 0;
+    } else if (strcmp(argv[i], "--benchmark") == 0) {
+      benchmark = 1;
+    } else if (strcmp(argv[i], "--duration") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
+        return 1;
+      }
+      const char *option = argv[i];
+      if (!parse_number(option, argv[++i], 0.001f, 86400.0f, &duration))
+        return 1;
     } else if (strcmp(argv[i], "--frames") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
@@ -4208,8 +4324,7 @@ int main(int argc, char **argv) {
       const char *option = argv[i];
       if (!parse_integer(option, argv[++i], 0, INT_MAX, &max_frames))
         return 1;
-    } else if (strcmp(argv[i], "--infinite") == 0) {
-      max_frames = 0;
+      frames_set = 1;
     } else if (strcmp(argv[i], "--shading-chars") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "fetch: option '%s' requires an argument\n", argv[i]);
@@ -4258,14 +4373,28 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (benchmark) {
+    if (frames_set && max_frames == 0 && duration == 0) {
+      fprintf(stderr, "fetch: --benchmark requires a positive frame count\n");
+      return 1;
+    }
+    if (!frames_set && duration == 0) max_frames = 1000;
+    show_info = 0;
+  }
+
   int cli_height = config_height;
   float cli_size = size_scale, cli_depth = config_depth;
   config_defaults();
-  load_config();
+  if (!benchmark) load_config();
   if (height_set) config_height = cli_height;
   if (size_set) size_scale = cli_size;
   if (depth_set) config_depth = cli_depth;
-  get_term_size(&term_rows, &term_cols);
+  if (benchmark) {
+    term_rows = 40;
+    term_cols = 120;
+  } else {
+    get_term_size(&term_rows, &term_cols);
+  }
 
   // Shading: CLI flags, then config, then the ascii default
   if (!shading && config_shading[0])
@@ -4282,6 +4411,7 @@ int main(int argc, char **argv) {
   if (config_spin_x >= 0 && !rotation_set) {
     rotate_x = config_spin_x;
     rotate_y = config_spin_y;
+    rotate_z = config_spin_z;
   }
   if (box_flag)
     config_box = 1;
@@ -4290,6 +4420,9 @@ int main(int argc, char **argv) {
     if (!load_logo_fastfetch(logo_name))
       load_default_logo();
     strncpy(distro, logo_name, sizeof(distro) - 1);
+  } else if (benchmark) {
+    load_default_logo();
+    strcpy(distro, "gentoo");
   } else {
     // Try logo.txt first
     int has_custom_logo = load_logo_file();
@@ -4367,7 +4500,8 @@ int main(int argc, char **argv) {
     field_line[i] = -1;
 
   if (show_info) {
-    gather_title();
+    if (config_show_title)
+      gather_title();
     for (int i = 0; i < field_count; i++) {
       int id = field_order[i];
       if (id == F_SEPARATOR) {
@@ -4396,6 +4530,7 @@ int main(int argc, char **argv) {
 
   float A = 0.0f;
   float B = 0.0f;
+  float C = 0.0f;
   float K1 = 37.0f * logo_height / 36.0f * size_scale;
   const float K2 = 5.5f;
 
@@ -4417,10 +4552,12 @@ int main(int argc, char **argv) {
   const float hl0 = sqrtf(hx0 * hx0 + hy0 * hy0 + hz0 * hz0);
   const float hlx = hx0 / hl0, hly = hy0 / hl0, hlz = hz0 / hl0;
 
-  signal(SIGINT, handle_signal);
-  signal(SIGTERM, handle_signal);
-  signal(SIGWINCH, handle_winch);
-  atexit(cleanup);
+  if (!benchmark) {
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+    signal(SIGWINCH, handle_winch);
+    atexit(cleanup);
+  }
 
   int fetch_start = show_info ? 1 : 0;
   // Tighten render_height to fit the face-on logo + info,
@@ -4433,7 +4570,7 @@ int main(int argc, char **argv) {
       render_height = needed;
   }
 
-  if (tcgetattr(STDIN_FILENO, &orig_termios) == 0) {
+  if (!benchmark && tcgetattr(STDIN_FILENO, &orig_termios) == 0) {
     termios_saved = 1;
     struct termios raw = orig_termios;
     raw.c_lflag &= ~(ICANON | ECHO);
@@ -4442,20 +4579,44 @@ int main(int argc, char **argv) {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
   }
 
-  printf("\033[?25l\033[?1002h\033[?1006h\033[2J");
-  fflush(stdout);
+  if (!benchmark) {
+    printf("\033[?25l\033[?1002h\033[?1006h\033[2J");
+    fflush(stdout);
+  }
 
   int mouse_dragging = 0;
   int mouse_last_x = 0, mouse_last_y = 0;
   float drag_vx = 0.0f, drag_vy = 0.0f;
 
-  for (int frame = 0; max_frames == 0 || frame < max_frames; frame++) {
+  struct timespec benchmark_start, benchmark_end;
+  unsigned long long rendered_frames = 0;
+  unsigned long long rendered_bytes = 0;
+  const char *last_frame = NULL;
+  size_t last_frame_size = 0;
+  if ((benchmark || duration > 0) &&
+      clock_gettime(CLOCK_MONOTONIC, &benchmark_start) != 0) {
+    perror("fetch: render clock");
+    return 1;
+  }
+
+  for (unsigned long long frame = 0;
+       max_frames == 0 || frame < (unsigned long long)max_frames; frame++) {
+    if (duration > 0) {
+      struct timespec now;
+      if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        perror("fetch: render clock");
+        return 1;
+      }
+      double elapsed = (double)(now.tv_sec - benchmark_start.tv_sec) +
+                       (now.tv_nsec - benchmark_start.tv_nsec) / 1e9;
+      if (elapsed >= duration) break;
+    }
     // Read input: mouse events control rotation, any other key exits.
     // Peek one byte first — only consume input if it's an escape (mouse).
     // Non-escape bytes stay in the buffer so the shell gets the keypress.
     int should_break = 0;
     struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
-    while (poll(&pfd, 1, 0) > 0) {
+    while (!benchmark && poll(&pfd, 1, 0) > 0) {
       static char ibuf[128];
       static int ibuf_len = 0;
 
@@ -4483,7 +4644,8 @@ int main(int argc, char **argv) {
         }
       } else {
         int n = read(STDIN_FILENO, ibuf + ibuf_len, sizeof(ibuf) - ibuf_len);
-        if (n > 0) ibuf_len += n;
+        if (n <= 0) { should_break = 1; break; }
+        ibuf_len += n;
       }
 
       int i = 0;
@@ -4494,15 +4656,15 @@ int main(int argc, char **argv) {
             int j = i + 3;
             int btn = 0, mx = 0, my = 0;
             while (j < ibuf_len && ibuf[j] >= '0' && ibuf[j] <= '9')
-              btn = btn * 10 + (ibuf[j++] - '0');
+              btn = append_escape_digit(btn, ibuf[j++]);
             if (j >= ibuf_len) break;
             if (ibuf[j] == ';') j++;
             while (j < ibuf_len && ibuf[j] >= '0' && ibuf[j] <= '9')
-              mx = mx * 10 + (ibuf[j++] - '0');
+              mx = append_escape_digit(mx, ibuf[j++]);
             if (j >= ibuf_len) break;
             if (ibuf[j] == ';') j++;
             while (j < ibuf_len && ibuf[j] >= '0' && ibuf[j] <= '9')
-              my = my * 10 + (ibuf[j++] - '0');
+              my = append_escape_digit(my, ibuf[j++]);
             if (j >= ibuf_len) break;
             char trail = ibuf[j++];
             if (trail != 'M' && trail != 'm') { i = j; continue; }
@@ -4542,6 +4704,8 @@ int main(int argc, char **argv) {
       } else if (i >= ibuf_len) {
         ibuf_len = 0;
       }
+      if (ibuf_len == (int)sizeof(ibuf))
+        should_break = 1;
       if (should_break) break;
     }
     if (should_break) break;
@@ -4593,10 +4757,12 @@ int main(int argc, char **argv) {
       } else {
         A += rotate_x ? 0.04f * speed : 0.0f;
         B += rotate_y ? 0.06f * speed : 0.0f;
+        C += rotate_z ? 0.05f * speed : 0.0f;
       }
     }
     float cA = cosf(A), sA = sinf(A);
     float cB = cosf(B), sB = sinf(B);
+    float cC = cosf(C), sC = sinf(C);
 
     const float lx = light_x, ly = light_y, lz = light_z;
     const float y_center = (!layout_stacked && show_info)
@@ -4616,29 +4782,33 @@ int main(int argc, char **argv) {
       float x2 = px * cB + z1 * sB;
       float z2 = -px * sB + z1 * cB;
       float y2 = y1;
+      float x3 = x2 * cC - y2 * sC;
+      float y3 = x2 * sC + y2 * cC; 
 
       float ny1 = ny * cA - nz * sA;
       float nz1 = ny * sA + nz * cA;
       float nx2 = nx * cB + nz1 * sB;
       float nz2 = -nx * sB + nz1 * cB;
       float ny2 = ny1;
+      float nx3 = nx2 * cC - ny2 * sC;
+      float ny3 = nx2 * sC + ny2 * cC;
 
       float zc = z2 + K2;
       if (zc < 0.1f)
         continue;
       float ooz = 1.0f / zc;
-      int xs = (int)((half_aw + k1x2 * x2 * ooz) * sub_cols);
-      int ys = (int)((y_center - K1 * y2 * ooz) * sub_rows);
+      int xs = (int)((half_aw + k1x2 * x3 * ooz) * sub_cols);
+      int ys = (int)((y_center - K1 * y3 * ooz) * sub_rows);
       if (xs < 0 || xs >= aw * sub_cols || ys < 0 ||
           ys >= render_height * sub_rows)
         continue;
 
       if (ooz > zbuf[ys][xs]) {
-        float diff = nx2 * lx + ny2 * ly + nz2 * lz;
+        float diff = nx3 * lx + ny3 * ly + nz2 * lz;
         if (diff < 0)
           diff = 0;
 
-        float spec_dot = nx2 * hlx + ny2 * hly + nz2 * hlz;
+        float spec_dot = nx3 * hlx + ny3 * hly + nz2 * hlz;
         if (spec_dot < 0)
           spec_dot = 0;
         float spec = spec_dot * spec_dot;
@@ -4669,7 +4839,8 @@ int main(int argc, char **argv) {
       out_cap = out_buf ? need : 0;
     }
     if (!out_buf) {
-      printf("\033[?25h");
+      if (!benchmark) printf("\033[?25h");
+      fprintf(stderr, "fetch: couldn't allocate frame buffer\n");
       return 1;
     }
     char *p = out_buf;
@@ -4769,9 +4940,51 @@ int main(int argc, char **argv) {
         *p++ = '\n';
       }
     }
-    if (write(STDOUT_FILENO, out_buf, p - out_buf) < 0)
-      break;
-    usleep(50000);
+    if (benchmark) {
+      last_frame = out_buf;
+      last_frame_size = (size_t)(p - out_buf);
+      rendered_bytes += last_frame_size;
+      rendered_frames++;
+    } else {
+      if (write(STDOUT_FILENO, out_buf, p - out_buf) < 0)
+        break;
+      rendered_frames++;
+      if (max_frames > 0 && rendered_frames >= (unsigned long long)max_frames)
+        break;
+      unsigned int delay = 50000;
+      if (duration > 0) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+          perror("fetch: render clock");
+          return 1;
+        }
+        double remaining = duration - ((double)(now.tv_sec - benchmark_start.tv_sec) +
+                           (now.tv_nsec - benchmark_start.tv_nsec) / 1e9);
+        if (remaining <= 0) break;
+        if (remaining < 0.05) delay = (unsigned int)(remaining * 1e6);
+      }
+      usleep(delay);
+    }
+  }
+
+  if (benchmark) {
+    if (clock_gettime(CLOCK_MONOTONIC, &benchmark_end) != 0) {
+      perror("fetch: benchmark clock");
+      return 1;
+    }
+    double elapsed = (double)(benchmark_end.tv_sec - benchmark_start.tv_sec) +
+                     (benchmark_end.tv_nsec - benchmark_start.tv_nsec) / 1e9;
+    // Consume the final frame outside the timed loop for output comparisons.
+    uint32_t checksum = 2166136261u;
+    for (size_t i = 0; i < last_frame_size; i++)
+      checksum = (checksum ^ (unsigned char)last_frame[i]) * 16777619u;
+    printf("Rendered %llu frames in %.6f seconds\n", rendered_frames, elapsed);
+    printf("%.2f FPS, %.6f ms/frame\n",
+           elapsed > 0 ? rendered_frames / elapsed : 0,
+           rendered_frames > 0 ? elapsed * 1000 / rendered_frames : 0);
+    printf("Canvas: %dx%d, points: %d, bytes: %llu, final-frame checksum: %08x\n",
+           anim_width, render_height, POINT_COUNT, rendered_bytes, checksum);
+    return 0;
   }
 
   printf("\033[?25h");
