@@ -31,34 +31,46 @@ class FetchTests(unittest.TestCase):
             capture_output=True, timeout=10
         )
 
-    def run_in_pty(self, args, home, rows, cols, resize_to=None):
+    def run_in_pty(self, args, home, rows, cols, resize_to=None, timeout=10):
         master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-        env = os.environ.copy()
-        env["HOME"] = str(home)
-        proc = subprocess.Popen([str(EXECUTABLE), *args], env=env, stdin=slave,
-                                stdout=slave, stderr=slave, start_new_session=True)
-        os.close(slave)
-        out, start = b"", time.monotonic()
-        while True:
-            if resize_to and time.monotonic() - start > 0.5:
-                fcntl.ioctl(master, termios.TIOCSWINSZ,
-                            struct.pack("HHHH", resize_to[0], resize_to[1], 0, 0))
-                proc.send_signal(signal.SIGWINCH)
-                resize_to = None
-            if select.select([master], [], [], 0.05)[0]:
-                try:
-                    chunk = os.read(master, 65536)
-                except OSError:
+        proc = None
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            proc = subprocess.Popen([str(EXECUTABLE), *args], env=env, stdin=slave,
+                                    stdout=slave, stderr=slave, start_new_session=True)
+            os.close(slave)
+            slave = None
+            out, start = b"", time.monotonic()
+            while True:
+                elapsed = time.monotonic() - start
+                if elapsed > timeout:
+                    self.fail(f"fetch did not exit within {timeout}s")
+                if resize_to and elapsed > 0.5:
+                    fcntl.ioctl(master, termios.TIOCSWINSZ,
+                                struct.pack("HHHH", resize_to[0], resize_to[1], 0, 0))
+                    proc.send_signal(signal.SIGWINCH)
+                    resize_to = None
+                if select.select([master], [], [], 0.05)[0]:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    out += chunk
+                elif proc.poll() is not None:
                     break
-                if not chunk:
-                    break
-                out += chunk
-            elif proc.poll() is not None:
-                break
-        proc.wait(timeout=10)
-        os.close(master)
-        return out
+            proc.wait(timeout=max(0.1, timeout - (time.monotonic() - start)))
+            return out
+        finally:
+            if slave is not None:
+                os.close(slave)
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            os.close(master)
 
     def last_frame_rows(self, out):
         frame = out.decode("utf-8", "replace").split("\x1b[H")[-1]
