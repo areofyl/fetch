@@ -59,13 +59,26 @@ custom_Editor=neovim
 
 These render like built-in fields (`Pronouns: he/him`) with the configured label color. You can place them anywhere in the field list and mix them with separators. No command execution — values are static strings only.
 
+Text preserves UTF-8 and ANSI SGR colors, but discards malformed UTF-8 and
+terminal control characters such as clipboard-setting escapes.
+
 ## Appearance
+
+```
+show_title=0
+```
+
+Hide the `user@host` title and its underline. Default is `1` (shown).
+Also accepts `yes`/`no`/`true`/`false`.
 
 ```
 label_color=magenta
 ```
 
 Color of the labels (the "CPU:", "Memory:", etc. text). Accepts: `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or an ANSI color number.
+
+Numeric colors may contain digits and semicolons (for example `38;5;123`).
+Invalid or oversized color values are ignored with a warning.
 
 ```
 separator=-
@@ -114,7 +127,7 @@ Light direction. Options: `top-left` (default), `top-right`, `top`, `left`, `rig
 spin=xy
 ```
 
-Which axes to rotate around. `x`, `y`, or `xy` (default).
+Which axes to rotate around. `x`, `y`, `z`, `xy`, `xz`, `yz` or `xyz` (default: `xy`).
 
 ```
 speed=1.0
@@ -133,6 +146,12 @@ depth=1.0
 ```
 
 3D extrusion depth. Higher = chunkier relief. Range: 0.1 to 10.0. If not set, fetch auto-scales depth based on the logo's character variance so flat logos don't look paper-thin.
+
+```
+solid_edges=1
+```
+
+Give outline characters extruded side walls. Off by default, so the outline of relief logos stays clean while spinning. Turn it on for flat, solid logos (every character the same weight) so the rim isn't see-through edge-on.
 
 ```
 height=36

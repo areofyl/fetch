@@ -6,8 +6,8 @@ A donut.c-inspired fetch tool that spins your distro logo in 3D with live-updati
 
 Takes any ASCII/Unicode distro logo, turns each character into a point cloud
 based on its visual density, and renders it as a rotating 3D relief with
-Blinn-Phong shading. System info is gathered natively with no external
-dependencies. Works on Linux and macOS.
+Blinn-Phong shading. System info comes from system files, OS APIs, and
+system utilities. Works on Linux and macOS.
 
 Based on [gentoo.c](https://github.com/areofyl/gentoo.c).
 
@@ -181,7 +181,9 @@ Without fastfetch, the built-in Gentoo logo is used.
 
 ## System info
 
-All system info is gathered natively. No fastfetch or neofetch needed:
+System info is gathered from system files and OS APIs, with utilities such as
+`lspci` and `system_profiler` used for some fields. Fastfetch and neofetch are
+not required:
 
 - **OS** - `/etc/os-release`
 - **Host** - `/proc/device-tree/model` or `/sys/class/dmi/id/product_name`
@@ -262,10 +264,11 @@ colors
 
 # 3d
 # light=top-left        (top-left, top-right, top, left, right, front, bottom-left, bottom-right)
-# spin=xy               (x, y, or xy)
+# spin=xy               (x, y, z, xy, xz, yz, or xyz)
 # speed=1.0             (rotation speed)
 # size=1.0              (logo scale, e.g. 2.0 for double size)
 # depth=1.0             (3D extrusion depth, e.g. 3.0 for chunkier look)
+# solid_edges=0         (side walls on outline chars, for flat solid logos)
 # height=36             (override render height in rows)
 # v_alignment=top       (top, center, bottom)
 # h_alignment=left      (left, center, right)
@@ -278,6 +281,7 @@ colors
 | `-l`, `--logo <name>` | Use a logo from fastfetch by name |
 | `--rotate-x` | Lock rotation to X axis only |
 | `--rotate-y` | Lock rotation to Y axis only |
+| `--rotate-z` | Lock rotation to Z axis only |
 | `-s`, `--speed <float>` | Speed multiplier (default 1.0) |
 | `--size <float>` | Scale the logo (e.g. 2.0 for double size) |
 | `--depth <float>` | Scale the 3D depth (default 1.0) |
@@ -286,13 +290,46 @@ colors
 | `--no-info` | Just the logo, no system info |
 | `--no-color` | Disable coloring |
 | `--frames <n>` | Stop after n frames |
-| `--infinite` | Run forever |
+| `--duration <seconds>` | Stop after the allotted rendering time (0.001–86400 seconds) |
+| `--benchmark` | Measure rendering speed without terminal output or frame delays |
 | `--shading-mode <mode>` | `ascii` (default), or opt into sub-cell blocks with `sextants` (2x3) or `blocks` (2x2) |
 | `--shading-chars <str>` | Custom shading ramp, supports UTF-8 |
 | `-h`, `--help` | Show help |
 | `-V`, `--version` | Show version |
 
 CLI flags override config file settings.
+
+Use `./fetch --duration 5` to animate for approximately five seconds. Timing
+starts after startup and system-info collection. If both `--frames` and
+`--duration` are supplied, the first limit reached stops the run. The current
+frame finishes before stopping, so a slow frame or terminal write can overrun
+the duration.
+
+## Benchmark
+
+```
+./fetch --benchmark --frames 10000
+./fetch --benchmark --duration 10
+```
+
+Reports elapsed time, FPS, milliseconds per frame, and a checksum of the final
+frame. The timed loop includes rotation, projection, shading, and frame-buffer
+construction. Startup, system info, terminal output, and the normal frame delay
+are excluded.
+
+For repeatable runs, benchmark mode ignores your config and custom logo file,
+uses the built-in Gentoo logo, and assumes a 120-column, 40-row terminal.
+Rendering flags such as `--size`, `--rotate-z`, and `--shading-mode` still work;
+`--logo` explicitly selects a fastfetch logo. The report includes the resulting
+canvas dimensions and point count. Input and terminal resizing are ignored.
+
+The default is 1000 frames when no duration is supplied. With `--duration`,
+there is no frame limit unless you also set a positive `--frames` value.
+Benchmark mode requires a positive frame count or a duration.
+Duration uses a monotonic clock and is checked before each frame; this adds
+timing overhead compared with a frame-count-only benchmark.
+Compare runs with the same build settings and rendering options. The final-frame
+checksum helps spot output changes, but is not a check of every rendered frame.
 
 ## Shading modes
 
@@ -337,13 +374,15 @@ For a deep dive with visuals and code, see the [full blog post](https://asdesai.
 
 3. **Point cloud** – the heightmap is sampled into 3D points. Interior cells get
    multiple Z layers for a solid extrusion, edge cells get only front and back
-   faces to keep outlines clean.
+   faces by default to keep outlines clean. Set `solid_edges=1` to add side
+   walls to outline cells on flat, solid logos.
 
 4. **Surface normals** – computed from the height gradient at each cell using
    finite differences, giving each point a direction for lighting.
 
-5. **Rotation + projection** – every frame, all points are rotated around X/Y
-   axes, then perspective-projected onto the terminal grid with a z-buffer to
+5. **Rotation + projection** – every frame, points and surface normals are
+   rotated around the selected X, Y, and/or Z axes (X/Y by default). Points
+   are then perspective-projected onto the terminal grid with a z-buffer to
    handle occlusion.
 
 6. **Shading** – Blinn-Phong lighting (diffuse + specular) gives every visible
@@ -360,6 +399,8 @@ For a deep dive with visuals and code, see the [full blog post](https://asdesai.
 
 7. **Rendering** – the entire frame is written in a single `write()` syscall to
    avoid flicker. System info is displayed alongside the animation and
-   fast-changing fields (uptime, memory, swap) update live every second.
+   fast-changing fields (uptime, memory, swap, battery) update live roughly
+   every second.
 
-Single file C, no dependencies beyond libm.
+Single-file C, linked with libm and, on macOS, the system IOKit and
+CoreFoundation frameworks. Fastfetch is optional for loading distro logos.
