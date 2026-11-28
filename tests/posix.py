@@ -366,7 +366,7 @@ class FetchTests(unittest.TestCase):
                         self.assertEqual(result.returncode, 0)
                         self.assertIn(key.encode(), result.stderr)
                         self.assertEqual(result.stdout, baseline.stdout)
-            for value in ["red", "38;5;123", "38;2;1;2;3"]:
+            for value in ["red", "38;5;123", "38;2;1;2;3", "38;2;255;181;150"]:
                 with self.subTest(valid_color=value):
                     config.write_text(settings + f"label_color={value}\n")
                     result = self.run_fetch(["--frames", "1"], home)
